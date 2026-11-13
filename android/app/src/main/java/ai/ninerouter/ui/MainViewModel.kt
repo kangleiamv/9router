@@ -73,6 +73,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _busy = MutableStateFlow<Set<String>>(emptySet())
     val busy: StateFlow<Set<String>> = _busy.asStateFlow()
 
+    /** Bumped whenever a live model catalog changes, so Compose re-reads specs. */
+    private val _catalogVersion = MutableStateFlow(0)
+    val catalogVersion: StateFlow<Int> = _catalogVersion.asStateFlow()
+
     /** Provider ids with an OAuth browser sign-in currently in flight. */
     private val _oauthBusy = MutableStateFlow<Set<String>>(emptySet())
     val oauthBusy: StateFlow<Set<String>> = _oauthBusy.asStateFlow()
@@ -278,6 +282,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runCatching { withContext(Dispatchers.IO) { repo.testConnection(connection) } }
                 .onSuccess { (ok, message) -> emit(message, !ok) }
                 .onFailure { emit(it.message ?: "Test failed", true) }
+            setBusy(connection.id, false)
+        }
+    }
+
+    fun fetchModels(connection: ProviderConnection) {
+        viewModelScope.launch {
+            setBusy(connection.id, true)
+            runCatching { withContext(Dispatchers.IO) { repo.fetchProviderModels(connection.id) } }
+                .onSuccess { result ->
+                    if (result.ok) _catalogVersion.value += 1
+                    emit(result.message, !result.ok)
+                }
+                .onFailure { emit(it.message ?: "Model fetch failed", true) }
             setBusy(connection.id, false)
         }
     }

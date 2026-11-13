@@ -424,7 +424,7 @@ class ProxyEngine(
                         put("owned_by", "9router")
                     })
                 }
-                ProviderCatalog.allWith(customSpecs).forEach { spec ->
+                ProviderCatalog.availableWith(customSpecs).forEach { spec ->
                     val prefix = if (spec.isCompatible) spec.alias ?: spec.id else spec.id
                     spec.models.forEach { model ->
                         add(buildJsonObject {

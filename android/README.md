@@ -12,6 +12,8 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 | Gateway | Ktor CIO on `127.0.0.1:20127`, OpenAI-compatible `/v1` API |
 | Storage | Room (`nine_router.db`), keys encrypted with Android Keystore AES-GCM |
 | Upstreams | OpenAI-compatible, Anthropic, Gemini, Gemini CLI, Antigravity and Ollama wire formats |
+| Providers | Full web registry (all visible providers, including transports that are not native yet), bundled provider logos, searchable provider directory |
+| Model discovery | Per-provider live model fetch (OpenAI/Anthropic/Gemini/Ollama/Code Assist/Antigravity), cached on-device and merged into pickers, combos and `/v1/models` |
 | Custom providers | User-defined OpenAI- or Anthropic-compatible nodes with a model prefix, model discovery and API-key connections |
 | OAuth | Browser sign-in for Antigravity, Gemini CLI and Claude Code with a one-shot loopback callback, PKCE for Claude, automatic token refresh |
 | Routing | Combos, vision combo, per-account fallback, exponential backoff, model locks |
@@ -22,7 +24,7 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 ## Screens
 
 - **Dashboard** — gateway state, base URL, active key, daily stats, recent requests
-- **Providers** — connections, priority order, test, edit, pause, delete, plus OpenAI/Anthropic compatible custom endpoints
+- **Providers** — searchable directory with logos, connections, priority order, test, live model fetch, edit, pause, delete, plus OpenAI/Anthropic compatible custom endpoints
 - **Combo & Vision** — ordered fallback chains and the vision adapter
 - **Endpoint & Key** — client credentials plus a copy-paste `curl` test
 - **Usage** — per-provider analytics and a filterable request log
@@ -63,10 +65,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.2.1>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.0>.
 
 ```bash
-adb install -r 9router-android-1.2.1-debug.apk
+adb install -r 9router-android-1.3.0-debug.apk
 ```
 
 Or download the artifact and open it on the device (allow install from unknown
@@ -117,6 +119,28 @@ model that is not enabled for the account. The app handles it as follows:
 
 If a client request still returns the 404, select `gemini-3.8-flash-medium` as
 the model in that client (the model the web dashboard uses by default).
+
+## Provider directory and live models
+
+The Providers screen is generated from the same registry as the web dashboard,
+so every visible provider appears with its logo, category, website and static
+model catalog. Providers whose transport is not implemented natively are shown
+in the collapsed **More providers** section instead of being silently omitted.
+
+For a provider that can route natively, tap **Models** on its connection card.
+The app calls that provider's own model-listing endpoint (with the stored key or
+OAuth token), caches the result in `files/provider_models.json`, and merges it
+into:
+
+- the connection's default-model picker and **Browse models** selector;
+- **Combo & Vision** member choice;
+- `/v1/models`;
+- Telegram `/model` and `/combo`.
+
+Refreshing is safe: static entries stay available as a fallback, and a failed
+fetch only reports the HTTP error. Model discovery is implemented for OpenAI,
+Anthropic, Gemini, Gemini CLI, Antigravity and Ollama-compatible endpoints,
+including provider-specific URLs where the chat base URL is not enough.
 
 ## Custom providers (OpenAI/Anthropic compatible)
 

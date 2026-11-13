@@ -93,9 +93,14 @@ fun ProvidersScreen(viewModel: MainViewModel) {
     val connections by viewModel.connections.collectAsState()
     val customNodes by viewModel.customProviders.collectAsState()
     val customSpecs by viewModel.customSpecs.collectAsState()
-    val allSpecs = remember(customSpecs) { ProviderCatalog.allWith(customSpecs) }
+    val catalogVersion by viewModel.catalogVersion.collectAsState()
+    val staticSpecs = remember(catalogVersion) { ProviderCatalog.all }
+    val allSpecs = remember(customSpecs, catalogVersion) { ProviderCatalog.allWith(customSpecs) }
+    val availableSpecs = remember(allSpecs) { allSpecs.filter { it.available } }
     val busy by viewModel.busy.collectAsState()
     val oauthBusy by viewModel.oauthBusy.collectAsState()
+    var query by remember { mutableStateOf("") }
+    var showUnavailable by remember { mutableStateOf(false) }
     var addProvider by remember { mutableStateOf<ProviderSpec?>(null) }
     var editing by remember { mutableStateOf<ProviderConnection?>(null) }
     var deleting by remember { mutableStateOf<ProviderConnection?>(null) }
@@ -104,6 +109,22 @@ fun ProvidersScreen(viewModel: MainViewModel) {
     var deleteCompatible by remember { mutableStateOf<CustomProvider?>(null) }
     var manageModels by remember { mutableStateOf<CustomProvider?>(null) }
     var now by remember { mutableStateOf(System.currentTimeMillis()) }
+    val needle = query.trim().lowercase()
+    val addable = availableSpecs.filter { spec ->
+        !spec.isCompatible &&
+            connections.none { it.provider == spec.id } &&
+            (needle.isBlank() ||
+                spec.name.lowercase().contains(needle) ||
+                spec.id.lowercase().contains(needle) ||
+                spec.allAliases.any { it.lowercase().contains(needle) })
+    }
+    val unsupported = staticSpecs.filter { spec ->
+        !spec.available &&
+            (needle.isBlank() ||
+                spec.name.lowercase().contains(needle) ||
+                spec.id.lowercase().contains(needle) ||
+                spec.allAliases.any { it.lowercase().contains(needle) })
+    }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -130,6 +151,15 @@ fun ProvidersScreen(viewModel: MainViewModel) {
                 }
             )
         }
+        item {
+            AppTextField(
+                value = query,
+                onValueChange = { query = it },
+                label = "Search providers",
+                placeholder = "Name, id or alias",
+                singleLine = true
+            )
+        }
         if (connections.isEmpty()) {
             item {
                 EmptyState(
@@ -146,7 +176,7 @@ fun ProvidersScreen(viewModel: MainViewModel) {
                 )
             }
         }
-        ProviderCatalog.all.forEach { spec ->
+        staticSpecs.forEach { spec ->
             val rows = connections.filter { it.provider == spec.id }
             if (rows.isNotEmpty()) {
                 item(key = "header-${spec.id}") {
@@ -159,6 +189,7 @@ fun ProvidersScreen(viewModel: MainViewModel) {
                         busy = busy.contains(connection.id),
                         now = now,
                         onTest = { viewModel.testConnection(connection) },
+                        onFetchModels = { viewModel.fetchModels(connection) },
                         onToggle = { viewModel.toggleConnection(connection) },
                         onEdit = { editing = connection },
                         onDelete = { deleting = connection }
@@ -221,6 +252,7 @@ fun ProvidersScreen(viewModel: MainViewModel) {
                     busy = busy.contains(connection.id),
                     now = now,
                     onTest = { viewModel.testConnection(connection) },
+                    onFetchModels = { manageModels = node },
                     onToggle = { viewModel.toggleConnection(connection) },
                     onEdit = { editing = connection },
                     onDelete = { deleting = connection }
@@ -234,7 +266,7 @@ fun ProvidersScreen(viewModel: MainViewModel) {
                 subtitle = "Tap a provider to create a new connection"
             )
         }
-        items(ProviderCatalog.all.filter { spec -> connections.none { it.provider == spec.id } }, key = { it.id }) { spec ->
+        items(addable, key = { "add-${it.id}" }) { spec ->
             AppCard(onClick = { addProvider = spec }, padding = 12.dp) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     ProviderAvatar(spec, size = 36.dp)
@@ -242,7 +274,7 @@ fun ProvidersScreen(viewModel: MainViewModel) {
                     Column(Modifier.weight(1f)) {
                         Text(spec.name, style = MaterialTheme.typography.titleSmall, color = TextPrimary)
                         Text(
-                            "${spec.models.size} models · ${spec.category}",
+                            "${spec.models.count { it.kind == "llm" }} models · ${spec.category}",
                             style = MaterialTheme.typography.bodySmall,
                             color = TextMuted
                         )
@@ -251,12 +283,54 @@ fun ProvidersScreen(viewModel: MainViewModel) {
                 }
             }
         }
+        if (addable.isEmpty() && needle.isNotBlank()) {
+            item {
+                Text(
+                    "No addable provider matches \"$query\".",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextMuted
+                )
+            }
+        }
+        if (unsupported.isNotEmpty()) {
+            item {
+                Spacer(Modifier.height(10.dp))
+                SectionHeader(
+                    title = "More providers",
+                    subtitle = "${unsupported.size} in the web dashboard · native transport pending",
+                    trailing = {
+                        TextButton(onClick = { showUnavailable = !showUnavailable }) {
+                            Text(if (showUnavailable) "Hide" else "Show", color = Brand)
+                        }
+                    }
+                )
+            }
+            if (showUnavailable) {
+                items(unsupported, key = { "unsupported-${it.id}" }) { spec ->
+                    AppCard(padding = 12.dp) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            ProviderAvatar(spec, size = 36.dp)
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(spec.name, style = MaterialTheme.typography.titleSmall, color = TextPrimary)
+                                Text(
+                                    "${spec.category} · Android transport not supported yet",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = TextMuted
+                                )
+                            }
+                            Text("Web", style = MaterialTheme.typography.labelSmall, color = TextMuted)
+                        }
+                    }
+                }
+            }
+        }
     }
 
     addProvider?.let { spec ->
         AddConnectionDialog(
             initial = spec,
-            options = allSpecs,
+            options = availableSpecs,
             oauthBusy = oauthBusy,
             onDismiss = { addProvider = null },
             onOAuth = { providerId -> viewModel.connectOAuth(providerId) { addProvider = null } },
@@ -805,6 +879,7 @@ private fun ConnectionCard(
     busy: Boolean,
     now: Long,
     onTest: () -> Unit,
+    onFetchModels: () -> Unit,
     onToggle: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit
@@ -917,6 +992,16 @@ private fun ConnectionCard(
                 }
                 Spacer(Modifier.width(6.dp))
                 Text("Test", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+            }
+            OutlinedButton(
+                onClick = onFetchModels,
+                enabled = !busy,
+                shape = MaterialTheme.shapes.small,
+                border = androidx.compose.foundation.BorderStroke(1.dp, AppBorder),
+                modifier = Modifier.weight(1f).height(38.dp),
+                contentPadding = PaddingValues(horizontal = 6.dp)
+            ) {
+                Text("Models", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
             }
             OutlinedButton(
                 onClick = onEdit,
@@ -1052,6 +1137,7 @@ private fun AddConnectionDialog(
             },
             supportingText = when {
                 oauth != null -> "Optional when you use the browser sign-in above."
+                spec.noAuth -> "This provider serves free inference without an API key."
                 spec.id == "opencode-zen" -> "Free models use the public inference lane and need no key."
                 spec.id == "ollama" -> "No key needed for a local Ollama server."
                 else -> null
@@ -1085,6 +1171,10 @@ private fun EditConnectionDialog(
     var model by remember { mutableStateOf(connection.defaultModel.orEmpty()) }
     var apiKey by remember { mutableStateOf("") }
     var reveal by remember { mutableStateOf(false) }
+    var modelPickerOpen by remember { mutableStateOf(false) }
+    val choices = remember(spec?.models) {
+        spec?.models?.filter { it.kind == "llm" }.orEmpty()
+    }
 
     DialogContent(
         title = "Edit connection",
@@ -1104,6 +1194,43 @@ private fun EditConnectionDialog(
         AppTextField(name, { name = it }, "Display name")
         Spacer(Modifier.height(10.dp))
         AppTextField(model, { model = it }, "Default model", placeholder = spec?.defaultModel ?: spec?.models?.firstOrNull()?.id)
+        if (choices.isNotEmpty()) {
+            Box {
+                TextButton(onClick = { modelPickerOpen = true }) {
+                    Text(
+                        "Browse ${choices.size} ${if (choices.size == 1) "model" else "models"}",
+                        color = Brand,
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
+                DropdownMenu(
+                    expanded = modelPickerOpen,
+                    onDismissRequest = { modelPickerOpen = false },
+                    modifier = Modifier.heightIn(max = 320.dp)
+                ) {
+                    choices.forEach { option ->
+                        DropdownMenuItem(
+                            text = {
+                                Column {
+                                    Text(option.id, color = TextPrimary, style = MaterialTheme.typography.bodyMedium)
+                                    if (option.name != option.id) {
+                                        Text(
+                                            option.name,
+                                            color = TextMuted,
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                }
+                            },
+                            onClick = {
+                                model = option.id
+                                modelPickerOpen = false
+                            }
+                        )
+                    }
+                }
+            }
+        }
         Spacer(Modifier.height(10.dp))
         AppTextField(
             value = apiKey,

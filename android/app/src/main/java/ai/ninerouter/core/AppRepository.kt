@@ -9,6 +9,7 @@ import ai.ninerouter.data.model.ProviderConnection
 import ai.ninerouter.data.model.RequestDetail
 import ai.ninerouter.data.model.Setting
 import ai.ninerouter.engine.ChatContext
+import ai.ninerouter.engine.ModelSpec
 import ai.ninerouter.engine.ProviderCatalog
 import ai.ninerouter.engine.ProviderSpec
 import ai.ninerouter.engine.UpstreamClient
@@ -23,8 +24,14 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import java.io.File
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -54,14 +61,32 @@ data class CompatibleProbe(
     val models: List<String> = emptyList()
 )
 
+/** Result of refreshing a provider's live model catalog. */
+data class ModelFetchResult(
+    val ok: Boolean,
+    val message: String,
+    val count: Int = 0
+)
+
 class AppRepository(context: android.content.Context) {
     private val db = ai.ninerouter.data.db.NineRouterDatabase.get(context)
+    private val modelCacheFile = File(context.filesDir, "provider_models.json")
     val providerDao = db.providerDao()
     val comboDao = db.comboDao()
     val apiKeyDao = db.apiKeyDao()
     val settingDao = db.settingDao()
     val detailDao = db.requestDetailDao()
     val customProviderDao = db.customProviderDao()
+
+    init {
+        // Loaded synchronously so the proxy server, Telegram bot and UI all see
+        // the last fetched catalogs even when they start before the first screen.
+        runCatching {
+            if (modelCacheFile.isFile) {
+                ProviderCatalog.setDynamicModels(parseModelCache(modelCacheFile.readText()))
+            }
+        }
+    }
 
     val engine = ai.ninerouter.engine.ProxyEngine(
         providerDao, comboDao, apiKeyDao, detailDao, customProviderDao
@@ -150,6 +175,9 @@ class AppRepository(context: android.content.Context) {
         val spec = ProviderCatalog.byId(providerId)
             ?: custom?.let(ProviderCatalog::customSpec)
             ?: throw IllegalArgumentException("Unknown provider $providerId")
+        if (!spec.available) {
+            throw IllegalArgumentException("${spec.name} is not supported by the Android transport yet")
+        }
         val now = Instant.now().toString()
         val connection = ProviderConnection(
             id = Ids.connectionId(),
@@ -419,6 +447,90 @@ class AppRepository(context: android.content.Context) {
             syncCustomDefaultModels(updated)
             merged
         }
+
+    /**
+     * Fetches a static provider's live model list and caches it. The cache is
+     * merged into [ProviderCatalog] immediately, so model pickers, combos,
+     * Telegram and `/v1/models` all see the new entries without a restart.
+     */
+    suspend fun fetchProviderModels(connectionId: String): ModelFetchResult =
+        withContext(Dispatchers.IO) {
+            val connection = providerDao.getById(connectionId)
+                ?: return@withContext ModelFetchResult(false, "Connection not found")
+            val spec = specById(connection.provider)
+                ?: return@withContext ModelFetchResult(false, "Unknown provider ${connection.provider}")
+            runCatching {
+                val fetched = UpstreamClient.listProviderModels(spec, connection)
+                val cache = LinkedHashMap(ProviderCatalog.dynamicModels())
+                cache[spec.id] = fetched
+                ProviderCatalog.setDynamicModels(cache)
+                saveModelCache(cache)
+
+                val merged = ProviderCatalog.byId(spec.id)?.models ?: fetched
+                val current = connection.defaultModel
+                if (current.isNullOrBlank() ||
+                    merged.none { it.id.equals(current, ignoreCase = true) }
+                ) {
+                    merged.firstOrNull { it.kind == "llm" }?.let { first ->
+                        providerDao.upsert(
+                            connection.copy(
+                                defaultModel = first.id,
+                                updatedAt = Instant.now().toString()
+                            )
+                        )
+                    }
+                }
+                ModelFetchResult(
+                    true,
+                    "Fetched ${fetched.count { it.kind == "llm" }} models from ${spec.name}",
+                    fetched.size
+                )
+            }.getOrElse { error ->
+                ModelFetchResult(
+                    false,
+                    error.message ?: "Could not fetch models from ${spec.name}"
+                )
+            }
+        }
+
+    private fun parseModelCache(raw: String): Map<String, List<ModelSpec>> {
+        val root = runCatching {
+            ai.ninerouter.util.Json.lenient.parseToJsonElement(raw) as? JsonObject
+        }.getOrNull() ?: return emptyMap()
+        return root.mapNotNull { (providerId, element) ->
+            val array = element as? JsonArray ?: return@mapNotNull null
+            val models = array.mapNotNull { item ->
+                val obj = item as? JsonObject ?: return@mapNotNull null
+                val id = (obj["id"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
+                if (id.isBlank()) return@mapNotNull null
+                val name = (obj["name"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+                val upstream = (obj["upstreamId"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+                val kind = (obj["kind"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+                ModelSpec(id = id, name = name ?: id, upstreamId = upstream, kind = kind ?: "llm")
+            }
+            if (models.isEmpty()) null else providerId to models
+        }.toMap()
+    }
+
+    private fun saveModelCache(cache: Map<String, List<ModelSpec>>) {
+        runCatching {
+            val root = buildJsonObject {
+                cache.forEach { (providerId, models) ->
+                    putJsonArray(providerId) {
+                        models.forEach { model ->
+                            add(buildJsonObject {
+                                put("id", model.id)
+                                put("name", model.name)
+                                model.upstreamId?.let { put("upstreamId", it) }
+                                put("kind", model.kind)
+                            })
+                        }
+                    }
+                }
+            }
+            modelCacheFile.writeText(root.toString())
+        }
+    }
 
     /** Keeps existing connections pointed at a model that still exists. */
     private suspend fun syncCustomDefaultModels(node: CustomProvider) {

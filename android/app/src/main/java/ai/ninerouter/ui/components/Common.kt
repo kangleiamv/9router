@@ -1,6 +1,7 @@
 package ai.ninerouter.ui.components
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -31,11 +33,17 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.VisualTransformation
@@ -55,6 +63,8 @@ import ai.ninerouter.ui.theme.Rose
 import ai.ninerouter.ui.theme.TextMuted
 import ai.ninerouter.ui.theme.TextPrimary
 import ai.ninerouter.ui.theme.TextSecondary
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -153,6 +163,33 @@ fun StatTile(label: String, value: String, hint: String? = null, accent: Color =
     }
 }
 
+/** Registry ids that use a differently named logo asset. */
+private val logoAliases = mapOf(
+    "opencode-zen" to "opencode",
+    "ollama-cloud" to "ollama",
+    "ollama" to "ollama-local",
+    "google-gemini" to "gemini",
+    "nvidia-nim" to "nvidia"
+)
+
+private object ProviderLogoCache {
+    private val cache = android.util.LruCache<String, ImageBitmap>(96)
+
+    suspend fun load(context: android.content.Context, providerId: String): ImageBitmap? {
+        val key = logoAliases[providerId.lowercase()] ?: providerId.lowercase()
+        cache.get(key)?.let { return it }
+        return withContext(Dispatchers.IO) {
+            val bitmap = runCatching {
+                context.assets.open("providers/$key.png").use { stream ->
+                    android.graphics.BitmapFactory.decodeStream(stream)?.asImageBitmap()
+                }
+            }.getOrNull()
+            if (bitmap != null) cache.put(key, bitmap)
+            bitmap
+        }
+    }
+}
+
 @Composable
 fun ProviderAvatar(providerId: String, size: Dp = 40.dp) {
     val spec = ProviderCatalog.byId(providerId)
@@ -164,20 +201,34 @@ fun ProviderAvatar(spec: ProviderSpec?, label: String = "", size: Dp = 40.dp) {
     val color = parseColor(spec?.color) ?: Brand
     val shape = RoundedCornerShape(size * 0.3f)
     val initial = (spec?.name ?: label).firstOrNull()?.uppercase().orEmpty()
+    val key = spec?.id ?: label
+    val context = LocalContext.current
+    val logo by produceState<ImageBitmap?>(null, key) {
+        value = ProviderLogoCache.load(context, key)
+    }
     Box(
         modifier = Modifier
             .size(size)
             .clip(shape)
-            .background(color.copy(alpha = 0.16f))
-            .border(1.dp, color.copy(alpha = 0.35f), shape),
+            .background(color.copy(alpha = 0.12f))
+            .border(1.dp, color.copy(alpha = 0.30f), shape),
         contentAlignment = Alignment.Center
     ) {
-        Text(
-            text = initial.ifBlank { "?" },
-            color = color,
-            fontWeight = FontWeight.Bold,
-            fontSize = (size.value * 0.4f).sp
-        )
+        if (logo != null) {
+            Image(
+                bitmap = logo!!,
+                contentDescription = spec?.name ?: label,
+                modifier = Modifier.fillMaxSize().padding(size * 0.12f),
+                contentScale = ContentScale.Fit
+            )
+        } else {
+            Text(
+                text = initial.ifBlank { "?" },
+                color = color,
+                fontWeight = FontWeight.Bold,
+                fontSize = (size.value * 0.4f).sp
+            )
+        }
     }
 }
 

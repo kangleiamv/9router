@@ -283,11 +283,20 @@ object UpstreamClient {
                 headers.remove("x-api-key")
             }
             else -> {
-                if (spec.isCompatible && spec.format == WireFormat.ANTHROPIC) {
-                    if (key.isNotBlank()) headers["x-api-key"] = key
+                if (spec.format == WireFormat.ANTHROPIC) {
+                    if (spec.authType == "oauth") {
+                        headers["Authorization"] = "Bearer ${creds["accessToken"] ?: key}"
+                    } else if (key.isNotBlank()) {
+                        headers["x-api-key"] = key
+                    }
                     headers["anthropic-version"] = "2023-06-01"
-                    headers.remove("Authorization")
-                } else if (!spec.isCompatible || key.isNotBlank()) {
+                    if (spec.authType == "oauth") headers.remove("x-api-key")
+                    if (spec.isCompatible && key.isNotBlank()) {
+                        // Third-party Anthropic-compatible gateways sometimes read
+                        // either header, so mirror the web executor and send both.
+                        headers["Authorization"] = "Bearer $key"
+                    }
+                } else if (!spec.noAuth && (!spec.isCompatible || key.isNotBlank())) {
                     headers["Authorization"] = "Bearer $key"
                 }
             }
@@ -391,7 +400,10 @@ object UpstreamClient {
             val toolArray = anthropicTools(ctx.raw["tools"])
             if (toolArray.isNotEmpty()) put("tools", toolArray)
         }
-        val url = if (spec.id == "claude") "$baseUrl/messages?beta=true" else "$baseUrl/messages"
+        val suffix = spec.querySuffix.ifBlank {
+            if (spec.id == "claude") "?beta=true" else ""
+        }
+        val url = "$baseUrl/messages$suffix"
         val builder = Request.Builder()
             .url(url)
             .post(payload.toString().toRequestBody(MEDIA_JSON))
@@ -949,6 +961,219 @@ object UpstreamClient {
         out.write("data: $last\n\n".toByteArray(Charsets.UTF_8))
         out.write("data: [DONE]\n\n".toByteArray(Charsets.UTF_8))
         out.flush()
+    }
+
+    /**
+     * Discovers the live model catalog for a provider using the provider's own
+     * metadata endpoint. This is deliberately separate from chat routing: the
+     * result is cached by [ai.ninerouter.core.AppRepository] and merged into
+     * [ProviderCatalog] so model pickers and `/v1/models` see new releases
+     * without an app update.
+     */
+    suspend fun listProviderModels(
+        spec: ProviderSpec,
+        connection: ProviderConnection
+    ): List<ModelSpec> = withContext(Dispatchers.IO) {
+        if (!spec.available) {
+            throw UpstreamException("${spec.name} is not available on the Android transport yet")
+        }
+        val creds = resolveCredentials(connection)
+        val models = when (spec.format) {
+            WireFormat.OPENAI, WireFormat.OLLAMA -> fetchOpenAiModels(spec, creds)
+            WireFormat.ANTHROPIC -> fetchAnthropicModels(spec, creds)
+            WireFormat.GEMINI -> fetchGeminiModels(spec, creds)
+            WireFormat.GEMINI_CLI -> fetchGeminiCliModels(spec, creds)
+            WireFormat.ANTIGRAVITY -> fetchAntigravityModels(spec, creds)
+        }
+        val clean = models
+            .map { it.copy(id = it.id.trim().removePrefix("models/")) }
+            .filter { it.id.isNotBlank() }
+            .distinctBy { it.id.lowercase() }
+        if (clean.isEmpty()) {
+            throw UpstreamException("${spec.name} returned no chat models")
+        }
+        clean
+    }
+
+    private fun modelsUrl(spec: ProviderSpec): String {
+        spec.modelsUrl?.takeIf { it.isNotBlank() }?.let { return it }
+        if (spec.format == WireFormat.GEMINI_CLI) {
+            return "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels"
+        }
+        if (spec.format == WireFormat.ANTIGRAVITY) {
+            return "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:models"
+        }
+        val base = spec.baseUrl?.trimEnd('/')
+            ?: throw UpstreamException("${spec.name} has no base URL configured")
+        return "$base/models"
+    }
+
+    private fun fetchOpenAiModels(spec: ProviderSpec, creds: Map<String, String>): List<ModelSpec> {
+        val builder = Request.Builder().url(modelsUrl(spec)).get()
+        authHeaders(spec, creds).forEach { (key, value) -> builder.header(key, value) }
+        val text = executeMetadata(builder.build(), spec)
+        return parseModels(text)
+    }
+
+    private fun fetchAnthropicModels(spec: ProviderSpec, creds: Map<String, String>): List<ModelSpec> {
+        val builder = Request.Builder().url(modelsUrl(spec)).get()
+        authHeaders(spec, creds).forEach { (key, value) -> builder.header(key, value) }
+        if (builder.build().header("anthropic-version") == null) {
+            builder.header("anthropic-version", "2023-06-01")
+        }
+        val text = executeMetadata(builder.build(), spec)
+        return parseModels(text)
+    }
+
+    private fun fetchGeminiModels(spec: ProviderSpec, creds: Map<String, String>): List<ModelSpec> {
+        val key = creds["apiKey"].orEmpty()
+        val url = appendQuery(
+            modelsUrl(spec),
+            "key",
+            key.ifBlank { creds["accessToken"].orEmpty() }
+        )
+        val builder = Request.Builder().url(url).get()
+            .header("Accept", "application/json")
+        if (key.isBlank() && !creds["accessToken"].isNullOrBlank()) {
+            builder.header("Authorization", "Bearer ${creds["accessToken"]}")
+        }
+        val text = executeMetadata(builder.build(), spec)
+        return parseModels(text, gemini = true)
+    }
+
+    private fun fetchGeminiCliModels(spec: ProviderSpec, creds: Map<String, String>): List<ModelSpec> {
+        val token = creds["accessToken"].orEmpty().ifBlank { creds["apiKey"].orEmpty() }
+        if (token.isBlank()) throw UpstreamException("Reconnect Gemini CLI to refresh its access token")
+        val project = creds["projectId"].orEmpty()
+        val body = buildJsonObject {
+            if (project.isNotBlank()) put("project", project)
+        }
+        val request = Request.Builder()
+            .url(modelsUrl(spec))
+            .post(body.toString().toRequestBody(MEDIA_JSON))
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .header("Authorization", "Bearer $token")
+            .header("User-Agent", "google-api-nodejs-client/9.15.1")
+            .header("X-Goog-Api-Client", "google-cloud-sdk vscode_cloudshelleditor/0.1")
+            .build()
+        return parseModels(executeMetadata(request, spec), geminiCli = true)
+    }
+
+    private fun fetchAntigravityModels(spec: ProviderSpec, creds: Map<String, String>): List<ModelSpec> {
+        val token = creds["accessToken"].orEmpty().ifBlank { creds["apiKey"].orEmpty() }
+        if (token.isBlank()) throw UpstreamException("Reconnect Antigravity to refresh its access token")
+        val request = Request.Builder()
+            .url(modelsUrl(spec))
+            .post("{}".toRequestBody(MEDIA_JSON))
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .header("Authorization", "Bearer $token")
+            .build()
+        return parseModels(executeMetadata(request, spec), geminiCli = true)
+    }
+
+    private fun executeMetadata(request: Request, spec: ProviderSpec): String {
+        plainClient.newCall(request).execute().use { response ->
+            val text = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                throw UpstreamException(
+                    "${spec.name} models HTTP ${response.code}: ${extractError(text).take(200)}"
+                )
+            }
+            return text
+        }
+    }
+
+    private fun appendQuery(url: String, key: String, value: String): String {
+        if (value.isBlank()) return url
+        val encoded = java.net.URLEncoder.encode(value, "UTF-8")
+        return url + (if (url.contains('?')) "&" else "?") + "$key=$encoded"
+    }
+
+    internal fun parseModels(
+        text: String,
+        gemini: Boolean = false,
+        geminiCli: Boolean = false
+    ): List<ModelSpec> {
+        val root = runCatching { Json.lenient.parseToJsonElement(text) }.getOrNull()
+            ?: throw UpstreamException("Provider returned an invalid model list")
+        val elements = when (root) {
+            is JsonArray -> root.toList()
+            is JsonObject -> when {
+                root["data"] is JsonArray -> (root["data"] as JsonArray).toList()
+                root["models"] is JsonArray -> (root["models"] as JsonArray).toList()
+                root["results"] is JsonArray -> (root["results"] as JsonArray).toList()
+                root["models"] is JsonObject -> {
+                    (root["models"] as JsonObject).entries.mapNotNull { (id, value) ->
+                        val info = value as? JsonObject ?: return@mapNotNull null
+                        if (info.boolean("isInternal") == true) return@mapNotNull null
+                        buildJsonObject {
+                            put("id", id)
+                            info.string("displayName")?.let { put("name", it) }
+                        }
+                    }
+                }
+                else -> emptyList()
+            }
+            else -> emptyList()
+        }
+        return elements.mapNotNull { element ->
+            when (element) {
+                is JsonPrimitive -> element.contentOrNull?.let { id ->
+                    ModelSpec(id = id, name = id)
+                }
+                is JsonObject -> {
+                    val rawId = element.string("id")
+                        ?: element.string("model")
+                        ?: element.string("name")
+                        ?: element.string("slug")
+                        ?: return@mapNotNull null
+                    val id = rawId.removePrefix("models/")
+                    if (gemini) {
+                        val methods = element.arr("supportedGenerationMethods")
+                            ?.mapNotNull { it.asString() }
+                        if (!methods.isNullOrEmpty() &&
+                            methods.none { it == "generateContent" || it == "streamGenerateContent" }
+                        ) {
+                            return@mapNotNull null
+                        }
+                    }
+                    if (geminiCli && element.boolean("isInternal") == true) return@mapNotNull null
+                    val kind = element.string("kind") ?: element.string("type")
+                    val type = kind?.lowercase()
+                    if (type != null && type in setOf("embedding", "tts", "stt", "image", "video")) {
+                        return@mapNotNull ModelSpec(
+                            id = id,
+                            name = element.string("display_name")
+                                ?: element.string("displayName")
+                                ?: element.string("name")
+                                ?: id,
+                            kind = type
+                        )
+                    }
+                    val lower = id.lowercase()
+                    if (lower.contains("embed") || lower.contains("whisper") ||
+                        lower.contains("tts") || lower.contains("transcribe") ||
+                        lower.contains("moderation") || lower.contains("image") ||
+                        lower.startsWith("dall-e")
+                    ) {
+                        return@mapNotNull null
+                    }
+                    val upstream = element.string("upstreamModelId")
+                        ?: element.string("upstream_model_id")
+                    ModelSpec(
+                        id = id,
+                        name = element.string("display_name")
+                            ?: element.string("displayName")
+                            ?: element.string("name")
+                            ?: id,
+                        upstreamId = upstream
+                    )
+                }
+                else -> null
+            }
+        }
     }
 
     /**

@@ -81,7 +81,10 @@ import kotlinx.serialization.json.JsonPrimitive
 fun CombosScreen(viewModel: MainViewModel) {
     val combos by viewModel.combos.collectAsState()
     val customSpecs by viewModel.customSpecs.collectAsState()
-    val allSpecs = remember(customSpecs) { ProviderCatalog.allWith(customSpecs) }
+    val catalogVersion by viewModel.catalogVersion.collectAsState()
+    val allSpecs = remember(customSpecs, catalogVersion) {
+        ProviderCatalog.availableWith(customSpecs)
+    }
     var editorOpen by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<Combo?>(null) }
     var deleting by remember { mutableStateOf<Combo?>(null) }

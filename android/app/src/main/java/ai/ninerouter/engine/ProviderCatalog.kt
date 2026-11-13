@@ -31,7 +31,16 @@ data class ProviderSpec(
     val website: String? = null,
     val models: List<ModelSpec> = emptyList(),
     /** Preferred model for new connections; falls back to the first catalog entry. */
-    val defaultModel: String? = null
+    val defaultModel: String? = null,
+    /** False for registry entries whose transport the native engine cannot speak yet. */
+    val available: Boolean = true,
+    /** Provider-specific model listing endpoint. Falls back to `<base>/models`. */
+    val modelsUrl: String? = null,
+    val modelsMethod: String = "GET",
+    /** Extra query string appended to Anthropic-compatible message requests. */
+    val querySuffix: String = "",
+    /** True when the provider serves anonymous/free inference without a key. */
+    val noAuth: Boolean = false
 ) {
     val allAliases: List<String>
         get() = listOfNotNull(id, alias, name.lowercase().replace(" ", "-")).distinct()
@@ -361,11 +370,65 @@ object ProviderCatalog {
         )
     )
 
-    val all: List<ProviderSpec> = listOf(
+    /** Hand-maintained entries that need Android-specific transport details. */
+    private val curated: List<ProviderSpec> = listOf(
         antigravity, claude, geminiCli, opencodeZen, openai, anthropic, gemini,
         openrouter, groq, deepseek, xai, mistral, together, fireworks, cerebras,
         nvidia, ollama
     )
+
+    private val curatedIds: Set<String> = curated.map { it.id }.toSet()
+
+    /**
+     * Every provider visible in the web dashboard, including entries the native
+     * transport cannot serve yet ([ProviderSpec.available] = false).
+     */
+    val all: List<ProviderSpec>
+        get() {
+            val merged = curated + ProviderCatalogGenerated.providers
+                .filter { it.id !in curatedIds }
+            val dynamic = dynamicModels
+            if (dynamic.isEmpty()) return merged
+            return merged.map { spec ->
+                val extra = dynamic[spec.id] ?: return@map spec
+                spec.copy(models = mergeModels(spec.models, extra))
+            }
+        }
+
+    /** Providers that can actually create a native connection. */
+    val available: List<ProviderSpec> get() = all.filter { it.available }
+
+    @Volatile
+    private var dynamicModels: Map<String, List<ModelSpec>> = emptyMap()
+
+    /** Replaces the in-memory cache of model ids fetched from provider APIs. */
+    fun setDynamicModels(models: Map<String, List<ModelSpec>>) {
+        dynamicModels = models.mapValues { (_, list) ->
+            list.filter { it.id.isNotBlank() }.distinctBy { it.id.lowercase() }
+        }.filterValues { it.isNotEmpty() }
+    }
+
+    fun dynamicModels(): Map<String, List<ModelSpec>> = dynamicModels
+
+    private fun mergeModels(static: List<ModelSpec>, fetched: List<ModelSpec>): List<ModelSpec> {
+        val byId = LinkedHashMap<String, ModelSpec>()
+        // Fetched names win, but curated entries keep their upstream mapping and
+        // kind when the provider reports only an id.
+        static.forEach { byId[it.id.lowercase()] = it }
+        fetched.forEach { model ->
+            val previous = byId[model.id.lowercase()]
+            byId[model.id.lowercase()] = if (previous == null) {
+                model
+            } else {
+                previous.copy(
+                    name = model.name.ifBlank { previous.name },
+                    upstreamId = model.upstreamId ?: previous.upstreamId,
+                    kind = if (model.kind == "llm") previous.kind else model.kind
+                )
+            }
+        }
+        return byId.values.toList()
+    }
 
     fun byId(id: String): ProviderSpec? =
         all.firstOrNull { it.id.equals(id, ignoreCase = true) }
@@ -412,6 +475,8 @@ object ProviderCatalog {
 
     fun allWith(extras: List<ProviderSpec>): List<ProviderSpec> = all + extras
 
+    fun availableWith(extras: List<ProviderSpec>): List<ProviderSpec> = available + extras
+
     /**
      * The user-facing model reference. Static providers use their provider id
      * (`openai/gpt-4o`); compatible endpoints use their configured prefix
@@ -428,12 +493,14 @@ object ProviderCatalog {
         if (slash > 0) {
             val prefix = trimmed.substring(0, slash)
             val rest = trimmed.substring(slash + 1)
-            val spec = byAliasOrId(prefix) ?: extras.firstOrNull { option ->
+            val spec = byAliasOrId(prefix)?.takeIf { it.available } ?: extras.firstOrNull { option ->
                 option.allAliases.any { it.equals(prefix, ignoreCase = true) }
             }
             if (spec != null) return spec to rest
         }
-        for (spec in all + extras) {
+        // A bare model id that the user explicitly added to a compatible
+        // endpoint wins over a same-named catalog entry.
+        for (spec in extras + available) {
             val hit = spec.models.firstOrNull { it.id.equals(trimmed, ignoreCase = true) }
             if (hit != null) return spec to hit.id
         }
@@ -457,12 +524,12 @@ object ProviderCatalog {
     }
 
     fun modelsForSelection(): List<Triple<String, String, String>> =
-        all.flatMap { spec ->
+        available.flatMap { spec ->
             spec.models.filter { it.kind == "llm" }.map { Triple(spec.id, it.id, it.name) }
         }
 
     fun modelsForSelection(extras: List<ProviderSpec>): List<Triple<String, String, String>> =
-        allWith(extras).flatMap { spec ->
+        availableWith(extras).flatMap { spec ->
             spec.models.filter { it.kind == "llm" }.map { Triple(spec.id, it.id, it.name) }
         }
 }

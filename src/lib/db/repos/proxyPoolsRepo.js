@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from "uuid";
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
+import { flushBlobSync } from "../blobSync.js";
 
 function rowToPool(row) {
   if (!row) return null;
@@ -74,6 +75,7 @@ export async function createProxyPool(data) {
     updatedAt: now,
   };
   upsert(db, pool);
+  await flushBlobSync();
   return pool;
 }
 
@@ -87,6 +89,7 @@ export async function updateProxyPool(id, data) {
     upsert(db, merged);
     result = merged;
   });
+  if (result) await flushBlobSync();
   return result;
 }
 
@@ -99,5 +102,6 @@ export async function deleteProxyPool(id) {
     removed = rowToPool(row);
     db.run(`DELETE FROM proxyPools WHERE id = ?`, [id]);
   });
+  if (removed) await flushBlobSync();
   return removed;
 }

@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from "uuid";
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
+import { flushBlobSync } from "../blobSync.js";
 
 function rowToNode(row) {
   if (!row) return null;
@@ -66,6 +67,7 @@ export async function createProviderNode(data) {
     updatedAt: now,
   };
   upsert(db, node);
+  await flushBlobSync();
   return node;
 }
 
@@ -79,6 +81,7 @@ export async function updateProviderNode(id, data) {
     upsert(db, merged);
     result = merged;
   });
+  if (result) await flushBlobSync();
   return result;
 }
 
@@ -92,5 +95,6 @@ export async function deleteProviderNode(id) {
     db.run(`DELETE FROM providerNodes WHERE id = ?`, [id]);
     db.run(`DELETE FROM kv WHERE scope = 'customModels' AND key LIKE ?`, [`${id}|%`]);
   });
+  if (removed) await flushBlobSync();
   return removed;
 }

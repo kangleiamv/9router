@@ -1,5 +1,6 @@
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "./jsonCol.js";
+import { flushBlobSync } from "../blobSync.js";
 
 export function makeKv(scope) {
   return {
@@ -18,6 +19,7 @@ export function makeKv(scope) {
     async set(key, value) {
       const db = await getAdapter();
       db.run(`INSERT INTO kv(scope, key, value) VALUES(?, ?, ?) ON CONFLICT(scope, key) DO UPDATE SET value = excluded.value`, [scope, key, stringifyJson(value)]);
+      await flushBlobSync();
     },
     async setMany(obj) {
       const db = await getAdapter();
@@ -26,14 +28,17 @@ export function makeKv(scope) {
           db.run(`INSERT INTO kv(scope, key, value) VALUES(?, ?, ?) ON CONFLICT(scope, key) DO UPDATE SET value = excluded.value`, [scope, k, stringifyJson(v)]);
         }
       });
+      await flushBlobSync();
     },
     async remove(key) {
       const db = await getAdapter();
       db.run(`DELETE FROM kv WHERE scope = ? AND key = ?`, [scope, key]);
+      await flushBlobSync();
     },
     async clear() {
       const db = await getAdapter();
       db.run(`DELETE FROM kv WHERE scope = ?`, [scope]);
+      await flushBlobSync();
     },
   };
 }

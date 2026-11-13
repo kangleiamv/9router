@@ -111,5 +111,10 @@ export async function createSqlJsAdapter(filePath) {
   process.on("SIGINT", flush);
   process.on("SIGTERM", flush);
 
-  return { driver: "sql.js", run, get, all, exec, transaction, close, raw: db };
+  const checkpoint = () => {
+    if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+    if (dirty) persist();
+  };
+
+  return { driver: "sql.js", run, get, all, exec, transaction, checkpoint, close, raw: db };
 }

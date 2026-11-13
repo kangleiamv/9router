@@ -1,6 +1,7 @@
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
 import { makeKv } from "../helpers/kvStore.js";
+import { flushBlobSync } from "../blobSync.js";
 
 const aliasKv = makeKv("modelAliases");
 const customKv = makeKv("customModels");
@@ -47,6 +48,7 @@ export async function addCustomModel({ providerAlias, id, type = "llm", name, ca
     db.run(`INSERT INTO kv(scope, key, value) VALUES('customModels', ?, ?)`, [k, value]);
     added = true;
   });
+  await flushBlobSync();
   return added;
 }
 

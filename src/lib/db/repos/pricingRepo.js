@@ -1,6 +1,7 @@
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
 import { makeKv } from "../helpers/kvStore.js";
+import { flushBlobSync } from "../blobSync.js";
 
 const pricingKv = makeKv("pricing");
 const CACHE_TTL_MS = 5000;
@@ -74,6 +75,7 @@ export async function updatePricing(pricingData) {
     }
   });
   invalidate();
+  await flushBlobSync();
   return await getUserPricing();
 }
 
@@ -98,6 +100,7 @@ export async function resetPricing(provider, model) {
     }
   });
   invalidate();
+  await flushBlobSync();
   return await getUserPricing();
 }
 

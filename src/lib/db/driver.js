@@ -1,5 +1,6 @@
 import { ensureDirs, DATA_FILE } from "./paths.js";
 import { stripNullBytes } from "./helpers/nullBytes.js";
+import { pullFromBlob, pushToBlob, refreshFromBlobIfUpdated, hasBlobStorage } from "./blobSync.js";
 
 // Use global to survive Next.js dev hot-reload (module state resets on reload)
 if (!global._dbAdapter) global._dbAdapter = { instance: null, initPromise: null, logged: false };
@@ -83,6 +84,14 @@ function withNullByteSafeParams(adapter) {
 
 async function initAdapter() {
   ensureDirs();
+  if (hasBlobStorage()) {
+    try {
+      await pullFromBlob();
+    } catch (e) {
+      console.warn(`[DB] pullFromBlob failed: ${e?.message}`);
+    }
+  }
+
   // Order per runtime:
   //   Bun:  bun:sqlite → sql.js
   //   Node: better-sqlite3 → node:sqlite (≥22.5) → sql.js
@@ -101,11 +110,32 @@ async function initAdapter() {
 
   const { runMigrationOnce } = await import("./migrate.js");
   await runMigrationOnce(adapter);
+
+  if (hasBlobStorage()) {
+    try {
+      await pushToBlob(adapter);
+    } catch (e) {
+      console.warn(`[DB] initial pushToBlob failed: ${e?.message}`);
+    }
+  }
+
   return adapter;
 }
 
 export async function getAdapter() {
-  if (state.instance) return state.instance;
+  if (state.instance) {
+    if (hasBlobStorage()) {
+      await refreshFromBlobIfUpdated(
+        () => state.instance,
+        async () => {
+          state.instance = null;
+          state.initPromise = null;
+          return getAdapter();
+        }
+      );
+    }
+    return state.instance;
+  }
   if (!state.initPromise) state.initPromise = initAdapter().then((a) => { state.instance = a; return a; });
   return state.initPromise;
 }

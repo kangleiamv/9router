@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from "uuid";
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
+import { flushBlobSync } from "../blobSync.js";
 
 const OPTIONAL_FIELDS = [
   "displayName", "email", "globalPriority", "defaultModel",
@@ -256,6 +257,7 @@ export async function createProviderConnection(data) {
     result = conn;
   });
 
+  await flushBlobSync();
   return result;
 }
 
@@ -273,6 +275,7 @@ export async function updateProviderConnection(id, data) {
     if (data.priority !== undefined) reorderInTx(db, existing.provider);
     result = merged;
   });
+  await flushBlobSync();
   return result;
 }
 
@@ -286,6 +289,7 @@ export async function deleteProviderConnection(id) {
     reorderInTx(db, row.provider);
     ok = true;
   });
+  if (ok) await flushBlobSync();
   return ok;
 }
 
@@ -293,12 +297,14 @@ export async function deleteProviderConnectionsByProvider(providerId) {
   const db = await getAdapter();
   const before = db.get(`SELECT COUNT(*) AS n FROM providerConnections WHERE provider = ?`, [providerId]);
   db.run(`DELETE FROM providerConnections WHERE provider = ?`, [providerId]);
+  await flushBlobSync();
   return before?.n || 0;
 }
 
 export async function reorderProviderConnections(providerId) {
   const db = await getAdapter();
   db.transaction(() => reorderInTx(db, providerId));
+  await flushBlobSync();
 }
 
 export async function cleanupProviderConnections() {
@@ -329,5 +335,6 @@ export async function cleanupProviderConnections() {
       if (dirty) upsert(db, conn);
     }
   });
+  if (cleaned > 0) await flushBlobSync();
   return cleaned;
 }

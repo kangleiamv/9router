@@ -3,6 +3,7 @@ import { getAdapter } from "./driver.js";
 import { stringifyJson, parseJson } from "./helpers/jsonCol.js";
 import { keyAccessFromColumns, keyAccessToColumns, validateKeyAccessInput } from "@/shared/utils/keyAccess.js";
 import { KEY_ACCESS_UNRESTRICTED } from "@/shared/constants/keyAccess.js";
+import { flushBlobSync } from "./blobSync.js";
 
 // Settings
 export {
@@ -173,6 +174,7 @@ export async function importDb(payload) {
     }
   });
 
+  await flushBlobSync();
   return await exportDb();
 }
 

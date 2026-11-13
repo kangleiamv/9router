@@ -30,6 +30,8 @@ import okio.BufferedSource
 import java.io.OutputStream
 import java.time.Instant
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class UpstreamResponse(
     val status: Int,
@@ -198,7 +200,15 @@ object UpstreamClient {
                 headers["x-app"] = "cli"
                 headers.remove("x-api-key")
             }
-            else -> headers["Authorization"] = "Bearer $key"
+            else -> {
+                if (spec.isCompatible && spec.format == WireFormat.ANTHROPIC) {
+                    if (key.isNotBlank()) headers["x-api-key"] = key
+                    headers["anthropic-version"] = "2023-06-01"
+                    headers.remove("Authorization")
+                } else if (!spec.isCompatible || key.isNotBlank()) {
+                    headers["Authorization"] = "Bearer $key"
+                }
+            }
         }
         return headers
     }
@@ -813,6 +823,45 @@ object UpstreamClient {
         out.write("data: [DONE]\n\n".toByteArray(Charsets.UTF_8))
         out.flush()
     }
+
+    /**
+     * Fetches model ids from a compatible endpoint's `/models`. Works for
+     * OpenAI-style (`Authorization: Bearer`) and Anthropic-style
+     * (`x-api-key` + version) servers.
+     */
+    suspend fun listModels(baseUrl: String, anthropic: Boolean, apiKey: String? = null): List<String> =
+        withContext(Dispatchers.IO) {
+            val url = baseUrl.trimEnd('/') + "/models"
+            val builder = Request.Builder().url(url).get()
+                .header("Accept", "application/json")
+            if (anthropic) {
+                if (!apiKey.isNullOrBlank()) builder.header("x-api-key", apiKey)
+                builder.header("anthropic-version", "2023-06-01")
+            } else if (!apiKey.isNullOrBlank()) {
+                builder.header("Authorization", "Bearer $apiKey")
+            }
+            plainClient.newCall(builder.build()).execute().use { response ->
+                val text = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    throw UpstreamException(
+                        "HTTP ${response.code}: ${extractError(text).take(240)}"
+                    )
+                }
+                val root = runCatching { Json.lenient.parseToJsonElement(text) }.getOrNull()
+                val array = when (root) {
+                    is JsonArray -> root
+                    is JsonObject -> (root["data"] as? JsonArray) ?: (root["models"] as? JsonArray)
+                    else -> null
+                } ?: throw UpstreamException("No model list returned by /models")
+                array.mapNotNull { element ->
+                    when (element) {
+                        is JsonPrimitive -> element.contentOrNull
+                        is JsonObject -> element.string("id") ?: element.string("name")
+                        else -> null
+                    }
+                }.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+            }
+        }
 
     /** Probes a connection with a minimal request; used by the Provider test button. */
     suspend fun testConnection(

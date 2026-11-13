@@ -12,6 +12,7 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 | Gateway | Ktor CIO on `127.0.0.1:20127`, OpenAI-compatible `/v1` API |
 | Storage | Room (`nine_router.db`), keys encrypted with Android Keystore AES-GCM |
 | Upstreams | OpenAI-compatible, Anthropic, Gemini, Gemini CLI, Antigravity and Ollama wire formats |
+| Custom providers | User-defined OpenAI- or Anthropic-compatible nodes with a model prefix, model discovery and API-key connections |
 | OAuth | Browser sign-in for Antigravity, Gemini CLI and Claude Code with a one-shot loopback callback, PKCE for Claude, automatic token refresh |
 | Routing | Combos, vision combo, per-account fallback, exponential backoff, model locks |
 | Telegram | Bot API long polling inside the foreground service, `/help` `/model` `/combo` `/vision` `/status` `/quota` `/clear` |
@@ -21,7 +22,7 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 ## Screens
 
 - **Dashboard** — gateway state, base URL, active key, daily stats, recent requests
-- **Providers** — connections, priority order, test, edit, pause, delete
+- **Providers** — connections, priority order, test, edit, pause, delete, plus OpenAI/Anthropic compatible custom endpoints
 - **Combo & Vision** — ordered fallback chains and the vision adapter
 - **Endpoint & Key** — client credentials plus a copy-paste `curl` test
 - **Usage** — per-provider analytics and a filterable request log
@@ -62,10 +63,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.1.0>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.2.0>.
 
 ```bash
-adb install -r 9router-android-1.1.0-debug.apk
+adb install -r 9router-android-1.2.0-debug.apk
 ```
 
 Or download the artifact and open it on the device (allow install from unknown
@@ -98,6 +99,35 @@ adb forward tcp:20127 tcp:20127
 curl http://127.0.0.1:20127/v1/models
 ```
 
+## Custom providers (OpenAI/Anthropic compatible)
+
+**Providers → Custom Providers (OpenAI/Anthropic Compatible)** creates a node
+for any compatible endpoint:
+
+1. Tap **Add OpenAI** or **Add Anthropic**.
+2. Enter a name, a model prefix (for example `oc-prod`), and the base URL ending
+   in `/v1`. The app appends `/chat/completions` for OpenAI and `/messages` for
+   Anthropic.
+3. Optionally enter an API key and tap **Check**. Checking first calls
+   `<baseUrl>/models`; if that endpoint is missing, enter a model id and the app
+   validates with a minimal chat request instead. On create, the key also
+   becomes the first connection.
+4. Add models manually in **Models**, or use **Fetch from /models**. The same
+   screen lets you remove model ids.
+
+Requests use the prefix as the provider namespace:
+
+```bash
+curl http://127.0.0.1:20127/v1/chat/completions \
+  -H "Authorization: Bearer sk-9r-..." \
+  -H "Content-Type: application/json" \
+  -d '{"model":"oc-prod/gpt-4o","messages":[{"role":"user","content":"hi"}]}'
+```
+
+Custom models are listed by `/v1/models`, in the combo picker and by `/model`
+in Telegram. Deleting a custom node also removes its connections; update any
+combo that referenced its prefix.
+
 ## Telegram
 
 Create a bot with @BotFather, paste the token and your chat id in the Telegram
@@ -110,6 +140,8 @@ cooling down (toggle in the Telegram screen).
 ## Notes and limits
 
 - The gateway binds to loopback only. Use `adb forward` for desktop clients.
+- Custom OpenAI-compatible nodes use Chat Completions. The Responses API is not
+  supported yet; choose Chat Completions when creating a node.
 - Streaming is relayed for OpenAI/Ollama upstreams and translated to OpenAI SSE
   chunks for Anthropic/Gemini/Antigravity.
 - Token counts for streaming responses are estimated (prompt only); buffered

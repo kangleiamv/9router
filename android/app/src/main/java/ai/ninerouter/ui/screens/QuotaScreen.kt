@@ -38,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import ai.ninerouter.data.model.ProviderConnection
 import ai.ninerouter.engine.FallbackPolicy
 import ai.ninerouter.engine.ProviderCatalog
+import ai.ninerouter.engine.ProviderSpec
 import ai.ninerouter.engine.specificData
 import ai.ninerouter.ui.MainViewModel
 import ai.ninerouter.ui.components.AppCard
@@ -62,6 +63,7 @@ import java.time.Instant
 @Composable
 fun QuotaScreen(viewModel: MainViewModel) {
     val connections by viewModel.connections.collectAsState()
+    val customSpecs by viewModel.customSpecs.collectAsState()
     val usage by viewModel.providerUsage.collectAsState()
     var now by remember { mutableStateOf(System.currentTimeMillis()) }
 
@@ -174,7 +176,14 @@ fun QuotaScreen(viewModel: MainViewModel) {
             }
             items(locked.size, key = { locked[it].first.id }) { index ->
                 val (connection, locks) = locked[index]
-                CooldownCard(connection, locks, now, onClear = { viewModel.clearCooldowns() })
+                CooldownCard(
+                    connection = connection,
+                    spec = customSpecs.firstOrNull { it.id == connection.provider }
+                        ?: ProviderCatalog.byId(connection.provider),
+                    locks = locks,
+                    now = now,
+                    onClear = { viewModel.clearCooldowns() }
+                )
             }
         }
         item {
@@ -241,11 +250,11 @@ fun QuotaScreen(viewModel: MainViewModel) {
 @Composable
 private fun CooldownCard(
     connection: ProviderConnection,
+    spec: ProviderSpec?,
     locks: List<Pair<String, Long>>,
     now: Long,
     onClear: () -> Unit
 ) {
-    val spec = ProviderCatalog.byId(connection.provider)
     AppCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             ProviderAvatar(spec, label = connection.provider, size = 34.dp)

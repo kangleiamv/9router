@@ -37,6 +37,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import ai.ninerouter.BuildConfig
 import ai.ninerouter.ui.MainViewModel
 import ai.ninerouter.ui.components.AppCard
 import ai.ninerouter.ui.components.AppTextField
@@ -192,7 +193,7 @@ fun SettingsScreen(viewModel: MainViewModel) {
                 InfoRow("Engine", "Ktor CIO + OkHttp")
                 InfoRow("UI", "Jetpack Compose · Material 3")
                 InfoRow("WebView", "none")
-                InfoRow("Version", "1.0.0")
+                InfoRow("Version", BuildConfig.VERSION_NAME)
                 Spacer(Modifier.height(8.dp))
                 Text(
                     "The foreground service keeps the gateway and Telegram polling alive while the app is backgrounded. " +

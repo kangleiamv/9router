@@ -1,8 +1,10 @@
 package ai.ninerouter.service.server
 
+import ai.ninerouter.BuildConfig
 import ai.ninerouter.core.AppContainer
 import ai.ninerouter.core.AppRepository
 import ai.ninerouter.core.ProxyRuntime
+import ai.ninerouter.data.model.CustomProvider
 import ai.ninerouter.data.model.ProviderConnection
 import ai.ninerouter.engine.ChatContext
 import ai.ninerouter.engine.EngineResult
@@ -114,7 +116,7 @@ object KtorProxyServer {
                 call.respondText(
                     buildJsonObject {
                         put("name", "9Router Android")
-                        put("version", "1.0.0")
+                        put("version", BuildConfig.VERSION_NAME)
                         put("endpoint", ProxyRuntime.endpoint)
                         put("status", if (ProxyRuntime.running.value) "running" else "stopped")
                         put("docs", "/api/status")
@@ -145,7 +147,7 @@ object KtorProxyServer {
                         put("activeConnections", connections.count { it.isActive })
                         put("keys", keys.size)
                         put("combos", combos.size)
-                        put("version", "1.0.0")
+                        put("version", BuildConfig.VERSION_NAME)
                     }.toString(),
                     ContentType.Application.Json
                 )
@@ -161,6 +163,7 @@ object KtorProxyServer {
                     val body = readJson(call.receiveText())
                     val provider = body.string("provider") ?: return@post call.badRequest("provider is required")
                     val spec = ProviderCatalog.byId(provider)
+                        ?: repo.customProviderDao.getById(provider)?.let(ProviderCatalog::customSpec)
                         ?: return@post call.badRequest("Unknown provider '$provider'")
                     val connection = repo.addConnection(
                         providerId = spec.id,
@@ -203,6 +206,114 @@ object KtorProxyServer {
                         buildJsonObject {
                             put("ok", ok)
                             put("message", message)
+                        }.toString(),
+                        ContentType.Application.Json
+                    )
+                }
+            }
+
+            // ---------------------------------------------------- custom providers
+            route("/api/provider-nodes") {
+                get {
+                    val nodes = repo.customProviderDao.getAll()
+                    call.respondText(
+                        buildJsonObject {
+                            putJsonArray("nodes") { nodes.forEach { add(nodeJsonElement(it)) } }
+                        }.toString(),
+                        ContentType.Application.Json
+                    )
+                }
+                get("/{id}") {
+                    val id = call.parameters["id"] ?: return@get call.badRequest("id is required")
+                    val node = repo.customProviderDao.getById(id)
+                        ?: return@get call.notFound("Provider node not found")
+                    call.respondText(
+                        buildJsonObject { put("node", nodeJsonElement(node)) }.toString(),
+                        ContentType.Application.Json
+                    )
+                }
+                post {
+                    val body = readJson(call.receiveText())
+                    val apiKey = body.string("apiKey")
+                    val node = repo.saveCustomProvider(
+                        id = null,
+                        type = body.string("type")
+                            ?: return@post call.badRequest("type is required"),
+                        name = body.string("name").orEmpty(),
+                        prefix = body.string("prefix").orEmpty(),
+                        apiType = body.string("apiType") ?: "chat",
+                        baseUrl = body.string("baseUrl").orEmpty(),
+                        models = (body["models"] as? JsonArray)
+                            ?.mapNotNull { extractModel(it) }.orEmpty(),
+                        apiKey = apiKey,
+                        createConnection = body.boolean("createConnection") ?: !apiKey.isNullOrBlank()
+                    )
+                    call.respondText(
+                        buildJsonObject { put("node", nodeJsonElement(node)) }.toString(),
+                        ContentType.Application.Json,
+                        HttpStatusCode.Created
+                    )
+                }
+                put("/{id}") {
+                    val id = call.parameters["id"] ?: return@put call.badRequest("id is required")
+                    val existing = repo.customProviderDao.getById(id)
+                        ?: return@put call.notFound("Provider node not found")
+                    val body = readJson(call.receiveText())
+                    val models = (body["models"] as? JsonArray)
+                        ?.mapNotNull { extractModel(it) } ?: existing.modelIds()
+                    val node = repo.saveCustomProvider(
+                        id = existing.id,
+                        type = body.string("type") ?: existing.type,
+                        name = body.string("name") ?: existing.name,
+                        prefix = body.string("prefix") ?: existing.prefix,
+                        apiType = body.string("apiType") ?: existing.apiType,
+                        baseUrl = body.string("baseUrl") ?: existing.baseUrl,
+                        models = models
+                    )
+                    call.respondText(
+                        buildJsonObject { put("node", nodeJsonElement(node)) }.toString(),
+                        ContentType.Application.Json
+                    )
+                }
+                delete("/{id}") {
+                    val id = call.parameters["id"] ?: return@delete call.badRequest("id is required")
+                    repo.deleteCustomProvider(id)
+                    call.respondText("""{"ok":true}""", ContentType.Application.Json)
+                }
+                post("/{id}/discover") {
+                    val id = call.parameters["id"] ?: return@post call.badRequest("id is required")
+                    val body = readJson(call.receiveText())
+                    val models = repo.discoverCustomModels(id, body.string("apiKey"))
+                    call.respondText(
+                        buildJsonObject {
+                            putJsonArray("models") { models.forEach { add(JsonPrimitive(it)) } }
+                        }.toString(),
+                        ContentType.Application.Json
+                    )
+                }
+                post("/validate") {
+                    val body = readJson(call.receiveText())
+                    val type = body.string("type") ?: "openai-compatible"
+                    if (type != "openai-compatible" && type != "anthropic-compatible") {
+                        return@post call.badRequest(
+                            "type must be openai-compatible or anthropic-compatible"
+                        )
+                    }
+                    val result = repo.probeCompatible(
+                        type = type,
+                        baseUrl = body.string("baseUrl").orEmpty(),
+                        apiKey = body.string("apiKey").orEmpty(),
+                        modelId = body.string("modelId")
+                    )
+                    call.respondText(
+                        buildJsonObject {
+                            put("valid", result.ok)
+                            put("message", result.message)
+                            if (result.models.isNotEmpty()) {
+                                putJsonArray("models") {
+                                    result.models.forEach { add(JsonPrimitive(it)) }
+                                }
+                            }
                         }.toString(),
                         ContentType.Application.Json
                     )
@@ -429,6 +540,18 @@ object KtorProxyServer {
 
     private fun connectionsJson(list: List<ProviderConnection>): String =
         "[${list.joinToString(",") { connectionJson(it) }}]"
+
+    private fun nodeJsonElement(node: CustomProvider): JsonObject = buildJsonObject {
+        put("id", node.id)
+        put("type", node.type)
+        put("name", node.name)
+        put("prefix", node.prefix)
+        put("apiType", node.apiType)
+        put("baseUrl", node.baseUrl)
+        putJsonArray("models") { node.modelIds().forEach { add(JsonPrimitive(it)) } }
+        put("createdAt", node.createdAt)
+        put("updatedAt", node.updatedAt)
+    }
 
     private fun comboJson(combo: ai.ninerouter.data.model.Combo): String = buildJsonObject {
         put("id", combo.id)

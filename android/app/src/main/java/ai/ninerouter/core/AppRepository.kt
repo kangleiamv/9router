@@ -1,7 +1,10 @@
 package ai.ninerouter.core
 
+import ai.ninerouter.data.model.ANTHROPIC_COMPATIBLE_TYPE
 import ai.ninerouter.data.model.ApiKey
 import ai.ninerouter.data.model.Combo
+import ai.ninerouter.data.model.CustomProvider
+import ai.ninerouter.data.model.OPENAI_COMPATIBLE_TYPE
 import ai.ninerouter.data.model.ProviderConnection
 import ai.ninerouter.data.model.RequestDetail
 import ai.ninerouter.data.model.Setting
@@ -15,9 +18,11 @@ import ai.ninerouter.util.Crypto
 import ai.ninerouter.util.Ids
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.time.Instant
 import java.time.LocalDate
@@ -41,6 +46,13 @@ data class ProviderUsage(
     val errors: Int
 )
 
+/** Result of validating a user-defined OpenAI/Anthropic compatible endpoint. */
+data class CompatibleProbe(
+    val ok: Boolean,
+    val message: String,
+    val models: List<String> = emptyList()
+)
+
 class AppRepository(context: android.content.Context) {
     private val db = ai.ninerouter.data.db.NineRouterDatabase.get(context)
     val providerDao = db.providerDao()
@@ -48,10 +60,14 @@ class AppRepository(context: android.content.Context) {
     val apiKeyDao = db.apiKeyDao()
     val settingDao = db.settingDao()
     val detailDao = db.requestDetailDao()
+    val customProviderDao = db.customProviderDao()
 
-    val engine = ai.ninerouter.engine.ProxyEngine(providerDao, comboDao, apiKeyDao, detailDao)
+    val engine = ai.ninerouter.engine.ProxyEngine(
+        providerDao, comboDao, apiKeyDao, detailDao, customProviderDao
+    )
 
     val connections: Flow<List<ProviderConnection>> = providerDao.observeAll()
+    val customProviders: Flow<List<CustomProvider>> = customProviderDao.observeAll()
     val combos: Flow<List<Combo>> = comboDao.observeAll()
     val keys: Flow<List<ApiKey>> = apiKeyDao.observeAll()
     val requests: Flow<List<RequestDetail>> = detailDao.observeRecent(300)
@@ -129,7 +145,9 @@ class AppRepository(context: android.content.Context) {
         providerSpecificData: String? = null,
         baseUrl: String? = null
     ): ProviderConnection = withContext(Dispatchers.IO) {
+        val custom = customProviderDao.getById(providerId)
         val spec = ProviderCatalog.byId(providerId)
+            ?: custom?.let(ProviderCatalog::customSpec)
             ?: throw IllegalArgumentException("Unknown provider $providerId")
         val now = Instant.now().toString()
         val connection = ProviderConnection(
@@ -144,7 +162,10 @@ class AppRepository(context: android.content.Context) {
             testStatus = null,
             defaultModel = spec.models.firstOrNull()?.id,
             displayName = name.ifBlank { spec.name },
-            providerSpecificData = mergeData(providerSpecificData, baseUrl),
+            providerSpecificData = mergeData(
+                providerSpecificData,
+                baseUrl?.takeIf { it.isNotBlank() } ?: custom?.baseUrl
+            ),
             createdAt = now,
             updatedAt = now
         )
@@ -210,6 +231,218 @@ class AppRepository(context: android.content.Context) {
         )
     }
 
+    // ------------------------------------------------------ custom providers
+
+    suspend fun customSpecs(): List<ProviderSpec> = withContext(Dispatchers.IO) {
+        customProviderDao.getAll().map(ProviderCatalog::customSpec)
+    }
+
+    suspend fun specById(providerId: String): ProviderSpec? = withContext(Dispatchers.IO) {
+        ProviderCatalog.byId(providerId)
+            ?: customProviderDao.getById(providerId)?.let(ProviderCatalog::customSpec)
+    }
+
+    /**
+     * Creates or updates a compatible endpoint. When [createConnection] is true
+     * and an API key is provided, a first connection is created in the same step.
+     */
+    suspend fun saveCustomProvider(
+        id: String?,
+        type: String,
+        name: String,
+        prefix: String,
+        apiType: String,
+        baseUrl: String,
+        models: List<String>,
+        apiKey: String? = null,
+        createConnection: Boolean = false
+    ): CustomProvider = withContext(Dispatchers.IO) {
+        if (type != OPENAI_COMPATIBLE_TYPE && type != ANTHROPIC_COMPATIBLE_TYPE) {
+            throw IllegalArgumentException("Unsupported custom provider type")
+        }
+        if (type == OPENAI_COMPATIBLE_TYPE && apiType != "chat") {
+            throw IllegalArgumentException("Responses API is not supported yet — use Chat Completions")
+        }
+        val cleanName = name.trim()
+        if (cleanName.isBlank()) throw IllegalArgumentException("Name is required")
+        val cleanPrefix = prefix.trim().removeSuffix("/")
+        if (cleanPrefix.isBlank()) throw IllegalArgumentException("Prefix is required")
+        if (cleanPrefix.any { it.isWhitespace() || it == '/' }) {
+            throw IllegalArgumentException("Prefix cannot contain spaces or slashes")
+        }
+        val cleanBase = ProviderCatalog.sanitizeBaseUrl(baseUrl, type)
+        if (cleanBase.isBlank()) throw IllegalArgumentException("Base URL is required")
+        if (!cleanBase.startsWith("http://") && !cleanBase.startsWith("https://")) {
+            throw IllegalArgumentException("Base URL must start with http:// or https://")
+        }
+        val existingNodes = customProviderDao.getAll()
+        if (existingNodes.any { it.prefix.equals(cleanPrefix, ignoreCase = true) && it.id != id }) {
+            throw IllegalArgumentException("Prefix '$cleanPrefix' is already used by another custom provider")
+        }
+        ProviderCatalog.byAliasOrId(cleanPrefix)?.let {
+            throw IllegalArgumentException("Prefix '$cleanPrefix' is reserved by ${it.name}")
+        }
+        val existing = id?.let { customProviderDao.getById(it) }
+        val now = Instant.now().toString()
+        val node = CustomProvider(
+            id = existing?.id ?: compatibleId(type, apiType),
+            type = type,
+            name = cleanName,
+            prefix = cleanPrefix,
+            apiType = if (type == OPENAI_COMPATIBLE_TYPE) apiType else "chat",
+            baseUrl = cleanBase,
+            models = existing?.models ?: "[]",
+            createdAt = existing?.createdAt ?: now,
+            updatedAt = now
+        ).withModels(models)
+        customProviderDao.upsert(node)
+        if (createConnection && !apiKey.isNullOrBlank()) {
+            addConnection(
+                providerId = node.id,
+                name = node.name,
+                apiKey = apiKey,
+                authType = "apikey",
+                providerSpecificData = customNodeData(node),
+                baseUrl = node.baseUrl
+            )
+        }
+        node
+    }
+
+    suspend fun saveCustomModels(nodeId: String, models: List<String>): CustomProvider =
+        withContext(Dispatchers.IO) {
+            val node = customProviderDao.getById(nodeId)
+                ?: throw IllegalArgumentException("Unknown custom provider")
+            val updated = node.withModels(models).copy(updatedAt = Instant.now().toString())
+            customProviderDao.upsert(updated)
+            syncCustomDefaultModels(updated)
+            updated
+        }
+
+    /** Deletes the endpoint and every connection that points at it. */
+    suspend fun deleteCustomProvider(nodeId: String) = withContext(Dispatchers.IO) {
+        providerDao.deleteByProvider(nodeId)
+        customProviderDao.delete(nodeId)
+    }
+
+    /** Checks a base URL/key and returns the model ids reported by `/models`. */
+    suspend fun probeCustomModels(type: String, baseUrl: String, apiKey: String): List<String> =
+        withContext(Dispatchers.IO) {
+            val clean = ProviderCatalog.sanitizeBaseUrl(baseUrl, type)
+            if (clean.isBlank()) throw IllegalArgumentException("Base URL is required")
+            UpstreamClient.listModels(clean, type == ANTHROPIC_COMPATIBLE_TYPE, apiKey)
+        }
+
+    /**
+     * Validates a compatible endpoint the same way the web dashboard's "Check"
+     * button does: first `/models`, then a minimal inference request when the
+     * server has no model-listing endpoint and a model id was supplied.
+     */
+    suspend fun probeCompatible(
+        type: String,
+        baseUrl: String,
+        apiKey: String,
+        modelId: String? = null
+    ): CompatibleProbe = withContext(Dispatchers.IO) {
+        val clean = ProviderCatalog.sanitizeBaseUrl(baseUrl, type)
+        if (clean.isBlank()) return@withContext CompatibleProbe(false, "Base URL is required")
+        try {
+            val models = UpstreamClient.listModels(clean, type == ANTHROPIC_COMPATIBLE_TYPE, apiKey)
+            return@withContext CompatibleProbe(
+                true,
+                "Valid · ${models.size} model${if (models.size == 1) "" else "s"} found",
+                models
+            )
+        } catch (listError: Exception) {
+            val probeModel = modelId?.trim()?.takeIf { it.isNotEmpty() }
+                ?: return@withContext CompatibleProbe(
+                    false,
+                    listError.message ?: "Could not reach /models"
+                )
+            val now = Instant.now().toString()
+            val node = CustomProvider(
+                id = "probe",
+                type = type,
+                name = "Probe",
+                prefix = "probe",
+                apiType = "chat",
+                baseUrl = clean,
+                models = "[]",
+                createdAt = now,
+                updatedAt = now
+            ).withModels(listOf(probeModel))
+            val connection = ProviderConnection(
+                id = "probe",
+                provider = node.id,
+                name = "Probe",
+                email = null,
+                authType = "apikey",
+                apiKey = Crypto.encrypt(apiKey),
+                priority = 1,
+                isActive = true,
+                defaultModel = probeModel,
+                providerSpecificData = null,
+                createdAt = now,
+                updatedAt = now
+            )
+            val (ok, message) = UpstreamClient.testConnection(
+                ProviderCatalog.customSpec(node),
+                connection,
+                probeModel
+            )
+            if (ok) {
+                CompatibleProbe(true, "Valid · inference test passed", listOf(probeModel))
+            } else {
+                CompatibleProbe(false, message)
+            }
+        }
+    }
+
+    /** Fetches `/models` for an existing custom provider and merges the result. */
+    suspend fun discoverCustomModels(nodeId: String, apiKey: String? = null): List<String> =
+        withContext(Dispatchers.IO) {
+            val node = customProviderDao.getById(nodeId)
+                ?: throw IllegalArgumentException("Unknown custom provider")
+            val key = apiKey?.takeIf { it.isNotBlank() }
+                ?: providerDao.getByProvider(nodeId).firstOrNull()
+                    ?.let { Crypto.decrypt(it.apiKey) }
+            val discovered = UpstreamClient.listModels(node.baseUrl, node.isAnthropic, key)
+            val merged = (node.modelIds() + discovered).distinct()
+            val updated = node.withModels(merged).copy(updatedAt = Instant.now().toString())
+            customProviderDao.upsert(updated)
+            syncCustomDefaultModels(updated)
+            merged
+        }
+
+    /** Keeps existing connections pointed at a model that still exists. */
+    private suspend fun syncCustomDefaultModels(node: CustomProvider) {
+        val ids = node.modelIds()
+        val first = ids.firstOrNull() ?: return
+        val now = Instant.now().toString()
+        providerDao.getByProvider(node.id).forEach { connection ->
+            val current = connection.defaultModel
+            if (current.isNullOrBlank() || ids.none { it.equals(current, ignoreCase = true) }) {
+                providerDao.upsert(
+                    connection.copy(defaultModel = first, updatedAt = now)
+                )
+            }
+        }
+    }
+
+    private fun compatibleId(type: String, apiType: String): String =
+        if (type == ANTHROPIC_COMPATIBLE_TYPE) {
+            "anthropic-compatible-${Ids.connectionId()}"
+        } else {
+            "openai-compatible-$apiType-${Ids.connectionId()}"
+        }
+
+    private fun customNodeData(node: CustomProvider): String = buildJsonObject {
+        put("baseUrl", node.baseUrl)
+        put("prefix", node.prefix)
+        put("apiType", node.apiType)
+        put("nodeName", node.name)
+    }.toString()
+
     private suspend fun nextPriority(providerId: String): Int {
         val existing = providerDao.getByProvider(providerId)
         return (existing.maxOfOrNull { it.priority } ?: 998) + 1
@@ -251,6 +484,7 @@ class AppRepository(context: android.content.Context) {
     suspend fun testConnection(connection: ProviderConnection): Pair<Boolean, String> =
         withContext(Dispatchers.IO) {
             val spec = ProviderCatalog.byId(connection.provider)
+                ?: customProviderDao.getById(connection.provider)?.let(ProviderCatalog::customSpec)
                 ?: return@withContext false to "Unknown provider"
             val model = connection.defaultModel ?: spec.models.firstOrNull()?.id ?: "default"
             val result = UpstreamClient.testConnection(spec, connection, model)
@@ -339,21 +573,28 @@ class AppRepository(context: android.content.Context) {
         )
     }
 
-    fun providerUsageFlow(): Flow<List<ProviderUsage>> = requests.map { list ->
-        val startOfDay = LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
-        list.filter { it.timestamp >= startOfDay }
-            .groupBy { it.provider ?: "unknown" }
-            .map { (provider, rows) ->
-                ProviderUsage(
-                    providerId = provider,
-                    name = ProviderCatalog.byId(provider)?.name ?: provider,
-                    requests = rows.size,
-                    tokens = rows.sumOf { ((it.promptTokens ?: 0) + (it.completionTokens ?: 0)).toLong() },
-                    errors = rows.count { (it.status ?: 0) >= 400 }
-                )
-            }
-            .sortedByDescending { it.requests }
-    }
+    fun providerUsageFlow(): Flow<List<ProviderUsage>> =
+        combine(requests, customProviders) { list, customNodes ->
+            val customNames = customNodes.associate { it.id to it.name }
+            val startOfDay =
+                LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+            list.filter { it.timestamp >= startOfDay }
+                .groupBy { it.provider ?: "unknown" }
+                .map { (provider, rows) ->
+                    ProviderUsage(
+                        providerId = provider,
+                        name = ProviderCatalog.byId(provider)?.name
+                            ?: customNames[provider]
+                            ?: provider,
+                        requests = rows.size,
+                        tokens = rows.sumOf {
+                            ((it.promptTokens ?: 0) + (it.completionTokens ?: 0)).toLong()
+                        },
+                        errors = rows.count { (it.status ?: 0) >= 400 }
+                    )
+                }
+                .sortedByDescending { it.requests }
+        }
 
     suspend fun clearRequests() = withContext(Dispatchers.IO) {
         detailDao.prune(System.currentTimeMillis() + 1)

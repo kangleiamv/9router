@@ -234,12 +234,18 @@ class TelegramBot(private val repo: AppRepository) {
         val settings = repo.settingsMap()
         val combo = settings["telegram_combo"].orEmpty()
         val configuredModel = settings["telegram_default_model"].orEmpty()
+        val customSpecs = repo.customSpecs()
         val route = combo.ifBlank { configuredModel }.ifBlank {
             repo.comboDao.getAll().firstOrNull()?.name
                 ?: repo.providerDao.getAll().firstOrNull()?.let { connection ->
-                    ProviderCatalog.byId(connection.provider)?.models?.firstOrNull()?.let {
-                        "${connection.provider}/${it.id}"
+                    val spec = ProviderCatalog.byId(connection.provider)
+                        ?: customSpecs.firstOrNull { it.id == connection.provider }
+                    val prefix = if (spec?.isCompatible == true) {
+                        spec.alias ?: connection.provider
+                    } else {
+                        connection.provider
                     }
+                    spec?.models?.firstOrNull()?.let { "$prefix/${it.id}" }
                 }.orEmpty()
         }
         if (route.isBlank()) {
@@ -266,18 +272,21 @@ class TelegramBot(private val repo: AppRepository) {
         send(chatId, reply)
     }
 
-    private fun modelListText(): String {
-        val grouped = ProviderCatalog.modelsForSelection().groupBy { it.first }
+    private suspend fun modelListText(): String {
+        val customSpecs = repo.customSpecs()
+        val specs = ProviderCatalog.allWith(customSpecs)
+        val grouped = ProviderCatalog.modelsForSelection(customSpecs).groupBy { it.first }
         return buildString {
             append("🤖 *Available models*\n")
             grouped.forEach { (provider, models) ->
-                val spec = ProviderCatalog.byId(provider)
+                val spec = specs.firstOrNull { it.id == provider }
+                val prefix = if (spec?.isCompatible == true) spec.alias ?: provider else provider
                 append("\n*${spec?.name ?: provider}*\n")
                 models.take(8).forEach { (_, id, name) ->
-                    append("• `$provider/$id` — $name\n")
+                    append("• `$prefix/$id` — $name\n")
                 }
             }
-            append("\nUse /model provider/model to select one.")
+            append("\nUse /model prefix/model to select one.")
         }
     }
 

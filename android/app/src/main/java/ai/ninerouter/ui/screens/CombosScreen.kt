@@ -52,6 +52,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import ai.ninerouter.data.model.Combo
 import ai.ninerouter.engine.ProviderCatalog
+import ai.ninerouter.engine.ProviderSpec
 import ai.ninerouter.ui.MainViewModel
 import ai.ninerouter.ui.components.AppCard
 import ai.ninerouter.ui.components.AppTextField
@@ -79,6 +80,8 @@ import kotlinx.serialization.json.JsonPrimitive
 @Composable
 fun CombosScreen(viewModel: MainViewModel) {
     val combos by viewModel.combos.collectAsState()
+    val customSpecs by viewModel.customSpecs.collectAsState()
+    val allSpecs = remember(customSpecs) { ProviderCatalog.allWith(customSpecs) }
     var editorOpen by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<Combo?>(null) }
     var deleting by remember { mutableStateOf<Combo?>(null) }
@@ -126,6 +129,7 @@ fun CombosScreen(viewModel: MainViewModel) {
         items(combos, key = { it.id }) { combo ->
             ComboCard(
                 combo = combo,
+                specs = allSpecs,
                 onEdit = {
                     editing = combo
                     editorOpen = true
@@ -151,6 +155,7 @@ fun CombosScreen(viewModel: MainViewModel) {
     if (editorOpen) {
         ComboEditorDialog(
             combo = editing,
+            specs = allSpecs,
             onDismiss = { editorOpen = false },
             onSave = { name, models, kind ->
                 viewModel.saveCombo(editing?.id, name, models, kind) { editorOpen = false }
@@ -172,7 +177,12 @@ fun CombosScreen(viewModel: MainViewModel) {
 }
 
 @Composable
-private fun ComboCard(combo: Combo, onEdit: () -> Unit, onDelete: () -> Unit) {
+private fun ComboCard(
+    combo: Combo,
+    specs: List<ProviderSpec>,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit
+) {
     val models = parseComboModels(combo)
     AppCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -201,7 +211,7 @@ private fun ComboCard(combo: Combo, onEdit: () -> Unit, onDelete: () -> Unit) {
         }
         Spacer(Modifier.height(12.dp))
         models.forEachIndexed { index, ref ->
-            val (spec, modelId) = ProviderCatalog.resolve(ref)
+            val (spec, modelId) = ProviderCatalog.resolve(ref, specs)
             Row(
                 Modifier.fillMaxWidth().padding(vertical = 3.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -217,7 +227,7 @@ private fun ComboCard(combo: Combo, onEdit: () -> Unit, onDelete: () -> Unit) {
                 }
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    spec?.let { ProviderCatalog.displayName(it.id, modelId) } ?: modelId,
+                    spec?.let { ProviderCatalog.displayName(it, modelId) } ?: modelId,
                     style = MaterialTheme.typography.bodySmall,
                     color = TextPrimary,
                     maxLines = 1,
@@ -253,6 +263,7 @@ private fun ComboCard(combo: Combo, onEdit: () -> Unit, onDelete: () -> Unit) {
 @Composable
 private fun ComboEditorDialog(
     combo: Combo?,
+    specs: List<ProviderSpec>,
     onDismiss: () -> Unit,
     onSave: (name: String, models: List<String>, kind: String?) -> Unit
 ) {
@@ -327,6 +338,7 @@ private fun ComboEditorDialog(
             SelectedModelRow(
                 index = index,
                 ref = ref,
+                specs = specs,
                 canUp = index > 0,
                 canDown = index < models.lastIndex,
                 onUp = {
@@ -350,6 +362,7 @@ private fun ComboEditorDialog(
 
     if (pickerOpen) {
         ModelPickerDialog(
+            specs = specs,
             alreadySelected = models.toSet(),
             onDismiss = { pickerOpen = false },
             onToggle = { ref ->
@@ -363,13 +376,14 @@ private fun ComboEditorDialog(
 private fun SelectedModelRow(
     index: Int,
     ref: String,
+    specs: List<ProviderSpec>,
     canUp: Boolean,
     canDown: Boolean,
     onUp: () -> Unit,
     onDown: () -> Unit,
     onRemove: () -> Unit
 ) {
-    val (spec, modelId) = ProviderCatalog.resolve(ref)
+    val (spec, modelId) = ProviderCatalog.resolve(ref, specs)
     Surface(
         modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
         shape = MaterialTheme.shapes.small,
@@ -387,7 +401,7 @@ private fun SelectedModelRow(
             Spacer(Modifier.width(8.dp))
             Column(Modifier.weight(1f)) {
                 Text(
-                    spec?.let { ProviderCatalog.displayName(it.id, modelId) } ?: modelId,
+                    spec?.let { ProviderCatalog.displayName(it, modelId) } ?: modelId,
                     style = MaterialTheme.typography.bodySmall,
                     color = TextPrimary,
                     maxLines = 1,
@@ -416,12 +430,13 @@ private fun SelectedModelRow(
 
 @Composable
 private fun ModelPickerDialog(
+    specs: List<ProviderSpec>,
     alreadySelected: Set<String>,
     onDismiss: () -> Unit,
     onToggle: (String) -> Unit
 ) {
     var query by remember { mutableStateOf("") }
-    val groups = ProviderCatalog.all.map { spec ->
+    val groups = specs.map { spec ->
         spec to spec.models.filter {
             query.isBlank() ||
                 it.id.contains(query, ignoreCase = true) ||
@@ -457,7 +472,7 @@ private fun ModelPickerDialog(
                             }
                         }
                         items(models, key = { "${spec.id}/${it.id}" }) { model ->
-                            val ref = "${spec.id}/${model.id}"
+                            val ref = ProviderCatalog.modelRef(spec, model.id)
                             val selected = alreadySelected.contains(ref)
                             Row(
                                 Modifier

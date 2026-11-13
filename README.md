@@ -106,11 +106,12 @@ quota tracking and the Telegram bot. Every screen is Compose — there is no
 WebView and no demo build.
 
 Download the debug APK from
-[Releases](https://github.com/kangleiamv/9router/releases/tag/android-v1.1.0),
-then `adb install -r 9router-android-1.1.0-debug.apk` (or open the file on the
+[Releases](https://github.com/kangleiamv/9router/releases/tag/android-v1.2.0),
+then `adb install -r 9router-android-1.2.0-debug.apk` (or open the file on the
 device). Build instructions are in [`android/README.md`](./android/README.md).
 Antigravity, Gemini CLI and Claude Code can be connected with a real OAuth
-sign-in from the Providers screen.
+sign-in from the Providers screen, and any OpenAI/Anthropic-compatible endpoint
+can be added as a custom provider with its own model prefix.
 
 **Alternative: run from source (this repository):**
 

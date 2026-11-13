@@ -2,6 +2,7 @@ package ai.ninerouter.engine
 
 import ai.ninerouter.data.db.ApiKeyDao
 import ai.ninerouter.data.db.ComboDao
+import ai.ninerouter.data.db.CustomProviderDao
 import ai.ninerouter.data.db.ProviderDao
 import ai.ninerouter.data.db.RequestDetailDao
 import ai.ninerouter.data.model.ApiKey
@@ -58,7 +59,8 @@ class ProxyEngine(
     private val providerDao: ProviderDao,
     private val comboDao: ComboDao,
     private val apiKeyDao: ApiKeyDao,
-    private val detailDao: RequestDetailDao
+    private val detailDao: RequestDetailDao,
+    private val customProviderDao: CustomProviderDao
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -291,12 +293,15 @@ class ProxyEngine(
 
     private suspend fun resolveTargets(model: String): List<Target> {
         val trimmed = model.trim()
+        val customSpecs = withContext(Dispatchers.IO) {
+            customProviderDao.getAll().map(ProviderCatalog::customSpec)
+        }
         val comboName = trimmed.removePrefix("combo/")
         val combos = withContext(Dispatchers.IO) { comboDao.getAll() }
         val combo = combos.firstOrNull { it.name.equals(comboName, ignoreCase = true) }
         if (combo != null) {
             return parseComboModels(combo).mapNotNull { member ->
-                val (spec, modelId) = ProviderCatalog.resolve(member)
+                val (spec, modelId) = ProviderCatalog.resolve(member, customSpecs)
                 spec?.let {
                     Target(it, normalizeModel(it, modelId), if (member.contains('/')) member else "${it.id}/$modelId")
                 }
@@ -306,18 +311,22 @@ class ProxyEngine(
             val visionCombo = combos.firstOrNull { it.kind == "vision" }
             if (visionCombo != null) {
                 return parseComboModels(visionCombo).mapNotNull { member ->
-                    val (spec, modelId) = ProviderCatalog.resolve(member)
+                    val (spec, modelId) = ProviderCatalog.resolve(member, customSpecs)
                     spec?.let { Target(it, normalizeModel(it, modelId), member) }
                 }
             }
         }
 
-        val (spec, modelId) = ProviderCatalog.resolve(trimmed)
+        val (spec, modelId) = ProviderCatalog.resolve(trimmed, customSpecs)
         if (spec != null) return listOf(Target(spec, normalizeModel(spec, modelId), trimmed))
 
-        // Unknown model: try every configured provider that speaks OpenAI in priority order.
+        // Unknown model: try every configured provider in priority order. Custom
+        // compatible endpoints are included so bare model ids can reach them too.
         val connections = withContext(Dispatchers.IO) { providerDao.getAll() }
-        val providers = connections.mapNotNull { ProviderCatalog.byId(it.provider) }.distinctBy { it.id }
+        val customById = customSpecs.associateBy { it.id }
+        val providers = connections.mapNotNull { connection ->
+            ProviderCatalog.byId(connection.provider) ?: customById[connection.provider]
+        }.distinctBy { it.id }
         return providers.map { Target(it, trimmed, "${it.id}/$trimmed") }
     }
 
@@ -402,6 +411,9 @@ class ProxyEngine(
 
     suspend fun listModels(): String {
         val combos = withContext(Dispatchers.IO) { comboDao.getAll() }
+        val customSpecs = withContext(Dispatchers.IO) {
+            customProviderDao.getAll().map(ProviderCatalog::customSpec)
+        }
         return buildJsonObject {
             put("object", "list")
             putJsonArray("data") {
@@ -412,10 +424,11 @@ class ProxyEngine(
                         put("owned_by", "9router")
                     })
                 }
-                ProviderCatalog.all.forEach { spec ->
+                ProviderCatalog.allWith(customSpecs).forEach { spec ->
+                    val prefix = if (spec.isCompatible) spec.alias ?: spec.id else spec.id
                     spec.models.forEach { model ->
                         add(buildJsonObject {
-                            put("id", "${spec.id}/${model.id}")
+                            put("id", "$prefix/${model.id}")
                             put("object", "model")
                             put("owned_by", spec.id)
                             put("name", model.name)

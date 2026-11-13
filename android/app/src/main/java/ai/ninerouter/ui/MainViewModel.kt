@@ -1,14 +1,17 @@
 package ai.ninerouter.ui
 
 import ai.ninerouter.core.AppContainer
+import ai.ninerouter.core.CompatibleProbe
 import ai.ninerouter.core.DashboardStats
 import ai.ninerouter.core.ProxyRuntime
 import ai.ninerouter.core.ProviderUsage
 import ai.ninerouter.data.model.ApiKey
 import ai.ninerouter.data.model.Combo
+import ai.ninerouter.data.model.CustomProvider
 import ai.ninerouter.data.model.ProviderConnection
 import ai.ninerouter.data.model.RequestDetail
 import ai.ninerouter.engine.ProviderCatalog
+import ai.ninerouter.engine.ProviderSpec
 import ai.ninerouter.engine.oauth.OAuthClient
 import ai.ninerouter.engine.oauth.OAuthException
 import ai.ninerouter.engine.oauth.OAuthProviders
@@ -28,6 +31,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -44,6 +48,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val combos: StateFlow<List<Combo>> =
         repo.combos.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val customProviders: StateFlow<List<CustomProvider>> =
+        repo.customProviders.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val customSpecs: StateFlow<List<ProviderSpec>> =
+        repo.customProviders
+            .map { nodes -> nodes.map(ProviderCatalog::customSpec) }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val keys: StateFlow<List<ApiKey>> =
         repo.keys.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -87,13 +99,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), DashboardStats())
 
     val providerUsage: StateFlow<List<ProviderUsage>> =
-        combine(repo.requests, repo.connections) { list, conns ->
+        combine(repo.requests, repo.connections, repo.customProviders) { list, conns, customNodes ->
             val start = LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
             val today = list.filter { it.timestamp >= start }
+            val customNames = customNodes.associate { it.id to it.name }
+            fun nameOf(provider: String): String =
+                ProviderCatalog.byId(provider)?.name ?: customNames[provider] ?: provider
             val grouped = today.groupBy { it.provider ?: "unknown" }.map { (provider, rows) ->
                 ProviderUsage(
                     providerId = provider,
-                    name = ProviderCatalog.byId(provider)?.name ?: provider,
+                    name = nameOf(provider),
                     requests = rows.size,
                     tokens = rows.sumOf { ((it.promptTokens ?: 0) + (it.completionTokens ?: 0)).toLong() },
                     errors = rows.count { (it.status ?: 0) >= 400 }
@@ -103,7 +118,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (grouped.none { it.providerId == provider }) {
                     grouped += ProviderUsage(
                         providerId = provider,
-                        name = ProviderCatalog.byId(provider)?.name ?: provider,
+                        name = nameOf(provider),
                         requests = 0, tokens = 0, errors = 0
                     )
                 }
@@ -173,6 +188,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         onDone: () -> Unit
     ) {
         viewModelScope.launch {
+            val providerLabel = withContext(Dispatchers.IO) {
+                repo.specById(providerId)?.name ?: providerId
+            }
             runCatching {
                 withContext(Dispatchers.IO) {
                     val data = buildString {
@@ -203,7 +221,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             }.onSuccess {
-                emit("${ProviderCatalog.byId(providerId)?.name ?: providerId} connection added")
+                emit("$providerLabel connection added")
                 onDone()
             }.onFailure { emit(it.message ?: "Could not add connection", true) }
         }
@@ -304,6 +322,98 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 emit("Connection updated")
                 onDone()
             }.onFailure { emit(it.message ?: "Update failed", true) }
+        }
+    }
+
+    fun saveCustomProvider(
+        id: String?,
+        type: String,
+        name: String,
+        prefix: String,
+        apiType: String,
+        baseUrl: String,
+        models: List<String>,
+        apiKey: String,
+        createConnection: Boolean,
+        onDone: (CustomProvider) -> Unit
+    ) {
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    repo.saveCustomProvider(
+                        id = id,
+                        type = type,
+                        name = name,
+                        prefix = prefix,
+                        apiType = apiType,
+                        baseUrl = baseUrl,
+                        models = models,
+                        apiKey = apiKey.ifBlank { null },
+                        createConnection = createConnection && apiKey.isNotBlank()
+                    )
+                }
+            }.onSuccess { node ->
+                emit(if (id == null) "Compatible provider created" else "Compatible provider updated")
+                onDone(node)
+            }.onFailure { emit(it.message ?: "Could not save compatible provider", true) }
+        }
+    }
+
+    fun deleteCustomProvider(node: CustomProvider) {
+        viewModelScope.launch {
+            runCatching { repo.deleteCustomProvider(node.id) }
+                .onSuccess { emit("${node.name} deleted") }
+                .onFailure { emit(it.message ?: "Delete failed", true) }
+        }
+    }
+
+    fun checkCustomProvider(
+        type: String,
+        baseUrl: String,
+        apiKey: String,
+        modelId: String,
+        onResult: (CompatibleProbe) -> Unit
+    ) {
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    repo.probeCompatible(type, baseUrl, apiKey, modelId)
+                }
+            }.onSuccess { result ->
+                emit(result.message, !result.ok)
+                onResult(result)
+            }.onFailure {
+                val message = it.message ?: "Check failed"
+                emit(message, true)
+                onResult(CompatibleProbe(false, message))
+            }
+        }
+    }
+
+    fun saveCustomModels(nodeId: String, models: List<String>, onDone: () -> Unit) {
+        viewModelScope.launch {
+            runCatching { repo.saveCustomModels(nodeId, models) }
+                .onSuccess {
+                    emit("Models updated")
+                    onDone()
+                }
+                .onFailure { emit(it.message ?: "Could not save models", true) }
+        }
+    }
+
+    fun discoverCustomModels(nodeId: String, apiKey: String, onDone: (List<String>?) -> Unit) {
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    repo.discoverCustomModels(nodeId, apiKey.ifBlank { null })
+                }
+            }.onSuccess { models ->
+                emit("Found ${models.size} models")
+                onDone(models)
+            }.onFailure {
+                emit(it.message ?: "Could not fetch models", true)
+                onDone(null)
+            }
         }
     }
 
@@ -412,9 +522,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     suspend fun defaultKey(): ApiKey? = withContext(Dispatchers.IO) { repo.defaultKey() }
 
-    fun models(): List<Triple<String, String, String>> = ProviderCatalog.modelsForSelection()
+    suspend fun models(): List<Triple<String, String, String>> =
+        withContext(Dispatchers.IO) { ProviderCatalog.modelsForSelection(repo.customSpecs()) }
 
-    fun providers() = ProviderCatalog.all
+    suspend fun providers(): List<ProviderSpec> =
+        withContext(Dispatchers.IO) { ProviderCatalog.allWith(repo.customSpecs()) }
+
+    /** Resolves a static provider or a user-defined compatible node by id. */
+    fun specFor(providerId: String): ProviderSpec? =
+        ProviderCatalog.byId(providerId) ?: customSpecs.value.firstOrNull { it.id == providerId }
 
     private fun setBusy(id: String, value: Boolean) {
         _busy.value = if (value) _busy.value + id else _busy.value - id

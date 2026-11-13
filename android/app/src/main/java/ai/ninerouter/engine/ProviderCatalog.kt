@@ -1,5 +1,9 @@
 package ai.ninerouter.engine
 
+import ai.ninerouter.data.model.ANTHROPIC_COMPATIBLE_TYPE
+import ai.ninerouter.data.model.CustomProvider
+import ai.ninerouter.data.model.OPENAI_COMPATIBLE_TYPE
+
 /**
  * Native provider registry. Mirrors the web registry at a compact, Android-friendly
  * level: each entry declares the wire format, the default base URL and the models
@@ -29,6 +33,9 @@ data class ProviderSpec(
 ) {
     val allAliases: List<String>
         get() = listOfNotNull(id, alias, name.lowercase().replace(" ", "-")).distinct()
+
+    /** True for user-defined OpenAI/Anthropic compatible endpoints. */
+    val isCompatible: Boolean get() = category == "compatible"
 }
 
 object ProviderCatalog {
@@ -348,17 +355,65 @@ object ProviderCatalog {
         return all.firstOrNull { spec -> spec.allAliases.any { it.lowercase() == key } }
     }
 
-    /** Resolves "ag/model", "model" (searching catalog) or a raw model name. */
-    fun resolve(modelRef: String): Pair<ProviderSpec?, String> {
+    /** Builds a runtime provider spec from a user-defined compatible endpoint. */
+    fun customSpec(node: CustomProvider): ProviderSpec {
+        val anthropic = node.type == ANTHROPIC_COMPATIBLE_TYPE
+        return ProviderSpec(
+            id = node.id,
+            name = node.name.ifBlank {
+                if (anthropic) "Anthropic Compatible" else "OpenAI Compatible"
+            },
+            alias = node.prefix,
+            format = if (anthropic) WireFormat.ANTHROPIC else WireFormat.OPENAI,
+            baseUrl = node.baseUrl,
+            chatPath = if (anthropic) "/messages" else "/chat/completions",
+            authType = "apikey",
+            category = "compatible",
+            color = if (anthropic) "#D97757" else "#10A37F",
+            models = node.modelIds().map { m(it, it) }
+        )
+    }
+
+    /**
+     * Sanitises a user-entered base URL. Anthropic endpoints must not carry a
+     * trailing `/messages` (the app appends it), and the same applies to
+     * `/chat/completions` for OpenAI-compatible endpoints.
+     */
+    fun sanitizeBaseUrl(raw: String, type: String): String {
+        var url = raw.trim().trimEnd('/')
+        if (type == ANTHROPIC_COMPATIBLE_TYPE && url.endsWith("/messages")) {
+            url = url.removeSuffix("/messages").trimEnd('/')
+        }
+        if (type == OPENAI_COMPATIBLE_TYPE && url.endsWith("/chat/completions")) {
+            url = url.removeSuffix("/chat/completions").trimEnd('/')
+        }
+        return url
+    }
+
+    fun allWith(extras: List<ProviderSpec>): List<ProviderSpec> = all + extras
+
+    /**
+     * The user-facing model reference. Static providers use their provider id
+     * (`openai/gpt-4o`); compatible endpoints use their configured prefix
+     * (`oc-prod/gpt-4o`), which is what the user typed when creating the node.
+     */
+    fun modelRef(spec: ProviderSpec, modelId: String): String {
+        val prefix = if (spec.isCompatible) spec.alias ?: spec.id else spec.id
+        return "$prefix/$modelId"
+    }
+
+    fun resolve(modelRef: String, extras: List<ProviderSpec> = emptyList()): Pair<ProviderSpec?, String> {
         val trimmed = modelRef.trim()
         val slash = trimmed.indexOf('/')
         if (slash > 0) {
             val prefix = trimmed.substring(0, slash)
             val rest = trimmed.substring(slash + 1)
-            val spec = byAliasOrId(prefix)
+            val spec = byAliasOrId(prefix) ?: extras.firstOrNull { option ->
+                option.allAliases.any { it.equals(prefix, ignoreCase = true) }
+            }
             if (spec != null) return spec to rest
         }
-        for (spec in all) {
+        for (spec in all + extras) {
             val hit = spec.models.firstOrNull { it.id.equals(trimmed, ignoreCase = true) }
             if (hit != null) return spec to hit.id
         }
@@ -371,6 +426,11 @@ object ProviderCatalog {
         return model?.name ?: modelId
     }
 
+    fun displayName(spec: ProviderSpec?, modelId: String): String {
+        val model = spec?.models?.firstOrNull { it.id.equals(modelId, ignoreCase = true) }
+        return model?.name ?: modelId
+    }
+
     fun upstreamModel(providerId: String, modelId: String): String {
         val spec = byId(providerId) ?: return modelId
         return spec.models.firstOrNull { it.id.equals(modelId, ignoreCase = true) }?.upstreamId ?: modelId
@@ -378,6 +438,11 @@ object ProviderCatalog {
 
     fun modelsForSelection(): List<Triple<String, String, String>> =
         all.flatMap { spec ->
+            spec.models.filter { it.kind == "llm" }.map { Triple(spec.id, it.id, it.name) }
+        }
+
+    fun modelsForSelection(extras: List<ProviderSpec>): List<Triple<String, String, String>> =
+        allWith(extras).flatMap { spec ->
             spec.models.filter { it.kind == "llm" }.map { Triple(spec.id, it.id, it.name) }
         }
 }

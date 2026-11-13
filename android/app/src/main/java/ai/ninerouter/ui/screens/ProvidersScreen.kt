@@ -49,12 +49,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import ai.ninerouter.core.CompatibleProbe
+import ai.ninerouter.data.model.ANTHROPIC_COMPATIBLE_TYPE
+import ai.ninerouter.data.model.CustomProvider
+import ai.ninerouter.data.model.OPENAI_COMPATIBLE_TYPE
 import ai.ninerouter.data.model.ProviderConnection
 import ai.ninerouter.engine.FallbackPolicy
 import ai.ninerouter.engine.ProviderCatalog
@@ -86,11 +91,18 @@ import kotlinx.coroutines.delay
 @Composable
 fun ProvidersScreen(viewModel: MainViewModel) {
     val connections by viewModel.connections.collectAsState()
+    val customNodes by viewModel.customProviders.collectAsState()
+    val customSpecs by viewModel.customSpecs.collectAsState()
+    val allSpecs = remember(customSpecs) { ProviderCatalog.allWith(customSpecs) }
     val busy by viewModel.busy.collectAsState()
     val oauthBusy by viewModel.oauthBusy.collectAsState()
     var addProvider by remember { mutableStateOf<ProviderSpec?>(null) }
     var editing by remember { mutableStateOf<ProviderConnection?>(null) }
     var deleting by remember { mutableStateOf<ProviderConnection?>(null) }
+    var createCompatible by remember { mutableStateOf<String?>(null) }
+    var editCompatible by remember { mutableStateOf<CustomProvider?>(null) }
+    var deleteCompatible by remember { mutableStateOf<CustomProvider?>(null) }
+    var manageModels by remember { mutableStateOf<CustomProvider?>(null) }
     var now by remember { mutableStateOf(System.currentTimeMillis()) }
 
     LaunchedEffect(Unit) {
@@ -108,11 +120,11 @@ fun ProvidersScreen(viewModel: MainViewModel) {
         item {
             SectionHeader(
                 title = "Providers",
-                subtitle = "${connections.size} connections · priority ordered",
+                subtitle = "${connections.size} connections · ${customNodes.size} custom endpoints",
                 trailing = {
                     PrimaryButton(
                         text = "Add",
-                        onClick = { addProvider = ProviderCatalog.all.first() },
+                        onClick = { addProvider = allSpecs.firstOrNull() },
                         icon = Icons.Filled.Add
                     )
                 }
@@ -127,7 +139,7 @@ fun ProvidersScreen(viewModel: MainViewModel) {
                     action = {
                         PrimaryButton(
                             text = "Add your first provider",
-                            onClick = { addProvider = ProviderCatalog.all.first() },
+                            onClick = { addProvider = allSpecs.firstOrNull() },
                             icon = Icons.Filled.Add
                         )
                     }
@@ -152,6 +164,67 @@ fun ProvidersScreen(viewModel: MainViewModel) {
                         onDelete = { deleting = connection }
                     )
                 }
+            }
+        }
+        item {
+            Spacer(Modifier.height(8.dp))
+            SectionHeader(
+                title = "Custom Providers (OpenAI/Anthropic Compatible)",
+                subtitle = "Route prefix/model to any compatible endpoint"
+            )
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                PrimaryButton(
+                    text = "Add OpenAI",
+                    onClick = { createCompatible = OPENAI_COMPATIBLE_TYPE },
+                    modifier = Modifier.weight(1f),
+                    icon = Icons.Filled.Add
+                )
+                GhostButton(
+                    text = "Add Anthropic",
+                    onClick = { createCompatible = ANTHROPIC_COMPATIBLE_TYPE },
+                    modifier = Modifier.weight(1f),
+                    icon = Icons.Filled.Add
+                )
+            }
+        }
+        if (customNodes.isEmpty()) {
+            item {
+                Text(
+                    "No custom providers — use the buttons above to add OpenAI/Anthropic compatible endpoints.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextMuted,
+                    modifier = Modifier.padding(vertical = 4.dp)
+                )
+            }
+        }
+        customNodes.forEach { node ->
+            val spec = customSpecs.firstOrNull { it.id == node.id }
+                ?: ProviderCatalog.customSpec(node)
+            val rows = connections.filter { it.provider == node.id }
+            item(key = "custom-${node.id}") {
+                CustomProviderCard(
+                    node = node,
+                    spec = spec,
+                    connectionCount = rows.size,
+                    onAddKey = { addProvider = spec },
+                    onModels = { manageModels = node },
+                    onEdit = { editCompatible = node },
+                    onDelete = { deleteCompatible = node }
+                )
+            }
+            items(rows, key = { it.id }) { connection ->
+                ConnectionCard(
+                    connection = connection,
+                    spec = spec,
+                    busy = busy.contains(connection.id),
+                    now = now,
+                    onTest = { viewModel.testConnection(connection) },
+                    onToggle = { viewModel.toggleConnection(connection) },
+                    onEdit = { editing = connection },
+                    onDelete = { deleting = connection }
+                )
             }
         }
         item {
@@ -183,6 +256,7 @@ fun ProvidersScreen(viewModel: MainViewModel) {
     addProvider?.let { spec ->
         AddConnectionDialog(
             initial = spec,
+            options = allSpecs,
             oauthBusy = oauthBusy,
             onDismiss = { addProvider = null },
             onOAuth = { providerId -> viewModel.connectOAuth(providerId) { addProvider = null } },
@@ -203,7 +277,8 @@ fun ProvidersScreen(viewModel: MainViewModel) {
     editing?.let { connection ->
         EditConnectionDialog(
             connection = connection,
-            spec = ProviderCatalog.byId(connection.provider),
+            spec = allSpecs.firstOrNull { it.id == connection.provider }
+                ?: ProviderCatalog.byId(connection.provider),
             onDismiss = { editing = null },
             onSave = { name, model, key ->
                 viewModel.saveConnection(connection, name, model, key) { editing = null }
@@ -222,11 +297,489 @@ fun ProvidersScreen(viewModel: MainViewModel) {
             onDismiss = { deleting = null }
         )
     }
+
+    createCompatible?.let { type ->
+        CompatibleProviderDialog(
+            type = type,
+            node = null,
+            onDismiss = { createCompatible = null },
+            onCheck = { baseUrl, key, modelId, onResult ->
+                viewModel.checkCustomProvider(type, baseUrl, key, modelId, onResult)
+            },
+            onSave = { name, prefix, apiType, baseUrl, models, apiKey ->
+                viewModel.saveCustomProvider(
+                    id = null,
+                    type = type,
+                    name = name,
+                    prefix = prefix,
+                    apiType = apiType,
+                    baseUrl = baseUrl,
+                    models = models,
+                    apiKey = apiKey,
+                    createConnection = true,
+                    onDone = { created ->
+                        createCompatible = null
+                        manageModels = created
+                    }
+                )
+            }
+        )
+    }
+
+    editCompatible?.let { node ->
+        CompatibleProviderDialog(
+            type = node.type,
+            node = node,
+            onDismiss = { editCompatible = null },
+            onCheck = { baseUrl, key, modelId, onResult ->
+                viewModel.checkCustomProvider(node.type, baseUrl, key, modelId, onResult)
+            },
+            onSave = { name, prefix, apiType, baseUrl, models, apiKey ->
+                viewModel.saveCustomProvider(
+                    id = node.id,
+                    type = node.type,
+                    name = name,
+                    prefix = prefix,
+                    apiType = apiType,
+                    baseUrl = baseUrl,
+                    models = models,
+                    apiKey = apiKey,
+                    createConnection = false,
+                    onDone = { editCompatible = null }
+                )
+            }
+        )
+    }
+
+    manageModels?.let { node ->
+        CustomModelsDialog(
+            node = node,
+            onDismiss = { manageModels = null },
+            onSave = { models ->
+                viewModel.saveCustomModels(node.id, models) { manageModels = null }
+            },
+            onDiscover = { key, onDone ->
+                viewModel.discoverCustomModels(node.id, key, onDone)
+            }
+        )
+    }
+
+    deleteCompatible?.let { node ->
+        val count = connections.count { it.provider == node.id }
+        ConfirmDialog(
+            title = "Delete custom provider?",
+            message = "\"${node.name}\" and its $count connection${if (count == 1) "" else "s"} will be removed from this device.",
+            onConfirm = {
+                viewModel.deleteCustomProvider(node)
+                deleteCompatible = null
+            },
+            onDismiss = { deleteCompatible = null }
+        )
+    }
 }
 
 @Composable
-private fun ProviderGroupHeader(spec: ProviderSpec, count: Int) {
-    Row(
+private fun CustomProviderCard(
+    node: CustomProvider,
+    spec: ProviderSpec,
+    connectionCount: Int,
+    onAddKey: () -> Unit,
+    onModels: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit
+) {
+    val accent = parseColor(spec.color) ?: Brand
+    AppCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            ProviderAvatar(spec, size = 40.dp)
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    node.name,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = TextPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    if (node.isAnthropic) "Anthropic compatible" else "OpenAI compatible · Chat Completions",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextMuted
+                )
+            }
+            StatusPill("Compatible", accent)
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            InfoChip(node.prefix, accent)
+            InfoChip("${node.modelIds().size} models")
+            InfoChip(if (connectionCount == 1) "1 key" else "$connectionCount keys")
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            node.baseUrl,
+            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+            color = TextMuted,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Route as ${node.prefix}/<model>",
+            style = MaterialTheme.typography.bodySmall,
+            color = TextSecondary
+        )
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            GhostButton(
+                text = "Add key",
+                onClick = onAddKey,
+                modifier = Modifier.weight(1f),
+                icon = Icons.Filled.Add
+            )
+            GhostButton(
+                text = "Models",
+                onClick = onModels,
+                modifier = Modifier.weight(1f)
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            GhostButton(
+                text = "Edit",
+                onClick = onEdit,
+                modifier = Modifier.weight(1f),
+                icon = Icons.Filled.Edit
+            )
+            GhostButton(
+                text = "Delete",
+                onClick = onDelete,
+                modifier = Modifier.weight(1f),
+                icon = Icons.Filled.Delete,
+                color = Rose
+            )
+        }
+    }
+}
+
+@Composable
+private fun InfoChip(text: String, color: Color = TextSecondary) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(AppSurfaceHigh)
+            .padding(horizontal = 7.dp, vertical = 3.dp)
+    ) {
+        Text(
+            text,
+            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+            color = color,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
+private fun CompatibleProviderDialog(
+    type: String,
+    node: CustomProvider?,
+    onDismiss: () -> Unit,
+    onCheck: (
+        baseUrl: String,
+        apiKey: String,
+        modelId: String,
+        onResult: (CompatibleProbe) -> Unit
+    ) -> Unit,
+    onSave: (
+        name: String,
+        prefix: String,
+        apiType: String,
+        baseUrl: String,
+        models: List<String>,
+        apiKey: String
+    ) -> Unit
+) {
+    val anthropic = type == ANTHROPIC_COMPATIBLE_TYPE
+    val defaultBase = if (anthropic) "https://api.anthropic.com/v1" else "https://api.openai.com/v1"
+    var name by remember(node?.id) { mutableStateOf(node?.name.orEmpty()) }
+    var prefix by remember(node?.id) { mutableStateOf(node?.prefix.orEmpty()) }
+    val apiType = node?.apiType ?: "chat"
+    var baseUrl by remember(node?.id) { mutableStateOf(node?.baseUrl ?: defaultBase) }
+    var modelsText by remember(node?.id) {
+        mutableStateOf(node?.modelIds()?.joinToString(", ").orEmpty())
+    }
+    var apiKey by remember(node?.id) { mutableStateOf("") }
+    var modelId by remember(node?.id) { mutableStateOf("") }
+    var checking by remember(node?.id) { mutableStateOf(false) }
+    var checkResult by remember(node?.id) { mutableStateOf<CompatibleProbe?>(null) }
+    val models = modelsText.split(',', '\n')
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .distinct()
+
+    DialogContent(
+        title = when {
+            node != null && anthropic -> "Edit Anthropic Compatible"
+            node != null -> "Edit OpenAI Compatible"
+            anthropic -> "Add Anthropic Compatible"
+            else -> "Add OpenAI Compatible"
+        },
+        confirmLabel = if (node == null) "Create" else "Save",
+        confirmEnabled = name.isNotBlank() && prefix.isNotBlank() && baseUrl.isNotBlank() && !checking,
+        onConfirm = {
+            onSave(
+                name.trim(),
+                prefix.trim().removeSuffix("/"),
+                if (anthropic) "chat" else apiType,
+                baseUrl.trim(),
+                models,
+                apiKey
+            )
+        },
+        onDismiss = onDismiss
+    ) {
+        Text(
+            if (anthropic) {
+                "Connect any Anthropic-compatible endpoint. Requests are sent to <base URL>/messages."
+            } else {
+                "Connect any OpenAI-compatible endpoint. Requests are sent to <base URL>/chat/completions."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = TextMuted
+        )
+        Spacer(Modifier.height(12.dp))
+        AppTextField(
+            name,
+            { name = it },
+            "Name",
+            placeholder = if (anthropic) "Anthropic Compatible (Prod)" else "OpenAI Compatible (Prod)",
+            supportingText = "Required. A friendly label for this node."
+        )
+        Spacer(Modifier.height(10.dp))
+        AppTextField(
+            prefix,
+            { prefix = it },
+            "Prefix",
+            placeholder = if (anthropic) "ac-prod" else "oc-prod",
+            supportingText = "Required. Used as the model prefix: prefix/model."
+        )
+        Spacer(Modifier.height(10.dp))
+        if (!anthropic) {
+            Text("API type", style = MaterialTheme.typography.labelMedium, color = TextMuted)
+            Spacer(Modifier.height(6.dp))
+            InfoChip("Chat Completions", Brand)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Responses API is not supported yet — use Chat Completions.",
+                style = MaterialTheme.typography.bodySmall,
+                color = TextMuted
+            )
+            Spacer(Modifier.height(10.dp))
+        }
+        AppTextField(
+            baseUrl,
+            { baseUrl = it },
+            "Base URL",
+            placeholder = defaultBase,
+            supportingText = "Use the base URL ending in /v1. The app appends " +
+                (if (anthropic) "/messages." else "/chat/completions.")
+        )
+        Spacer(Modifier.height(12.dp))
+        Text("Check connection", style = MaterialTheme.typography.labelMedium, color = TextMuted)
+        Spacer(Modifier.height(6.dp))
+        AppTextField(
+            apiKey,
+            { apiKey = it },
+            "API key",
+            placeholder = "sk-...",
+            visualTransformation = PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            supportingText = if (node == null) {
+                "Optional. Used for Check and saved as the first connection key."
+            } else {
+                "Only used for Check. Existing connection keys are unchanged."
+            }
+        )
+        Spacer(Modifier.height(8.dp))
+        AppTextField(
+            modelId,
+            { modelId = it },
+            "Model ID (optional)",
+            placeholder = "gpt-4o, claude-3-opus",
+            supportingText = "Only needed when the server has no /models endpoint."
+        )
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedButton(
+                onClick = {
+                    checking = true
+                    checkResult = null
+                    onCheck(baseUrl, apiKey, modelId) { result ->
+                        checking = false
+                        checkResult = result
+                        if (result.ok && result.models.isNotEmpty()) {
+                            modelsText = result.models.joinToString(", ")
+                        }
+                    }
+                },
+                enabled = baseUrl.isNotBlank() && !checking,
+                shape = MaterialTheme.shapes.small,
+                border = androidx.compose.foundation.BorderStroke(1.dp, AppBorder)
+            ) {
+                if (checking) {
+                    CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = Brand)
+                    Spacer(Modifier.width(6.dp))
+                }
+                Text(if (checking) "Checking…" else "Check", color = TextSecondary)
+            }
+            checkResult?.let { result ->
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    if (result.ok) "Valid" else "Invalid",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (result.ok) Emerald else Rose
+                )
+            }
+        }
+        checkResult?.let { result ->
+            Spacer(Modifier.height(4.dp))
+            Text(
+                result.message,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (result.ok) Emerald else Rose
+            )
+        }
+        Spacer(Modifier.height(12.dp))
+        AppTextField(
+            modelsText,
+            { modelsText = it },
+            "Model IDs (comma separated)",
+            placeholder = "gpt-4o, gpt-4o-mini",
+            singleLine = false,
+            minLines = 2,
+            maxLines = 4,
+            supportingText = "Shown in /v1/models and combo pickers. You can also fetch them later."
+        )
+    }
+}
+
+@Composable
+private fun CustomModelsDialog(
+    node: CustomProvider,
+    onDismiss: () -> Unit,
+    onSave: (List<String>) -> Unit,
+    onDiscover: (apiKey: String, onDone: (List<String>?) -> Unit) -> Unit
+) {
+    var models by remember(node.id) { mutableStateOf(node.modelIds()) }
+    var newModel by remember { mutableStateOf("") }
+    var apiKey by remember { mutableStateOf("") }
+    var fetching by remember { mutableStateOf(false) }
+
+    DialogContent(
+        title = "Models · ${node.name}",
+        confirmLabel = "Save",
+        onConfirm = { onSave(models) },
+        onDismiss = onDismiss
+    ) {
+        Text(
+            "Model IDs exposed by ${node.prefix}. Requests use ${node.prefix}/<model>.",
+            style = MaterialTheme.typography.bodySmall,
+            color = TextMuted
+        )
+        Spacer(Modifier.height(8.dp))
+        if (models.isEmpty()) {
+            Text(
+                "No models yet. Add one manually or fetch the endpoint's /models list.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Amber
+            )
+        }
+        models.forEach { id ->
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    id,
+                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                    color = TextPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                IconButton(
+                    onClick = { models = models - id },
+                    modifier = Modifier.size(30.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.Delete,
+                        contentDescription = "Remove model",
+                        tint = Rose,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            AppTextField(
+                newModel,
+                { newModel = it },
+                "Add model ID",
+                modifier = Modifier.weight(1f),
+                placeholder = "gpt-4o"
+            )
+            Spacer(Modifier.width(8.dp))
+            TextButton(
+                onClick = {
+                    val value = newModel.trim()
+                    if (value.isNotEmpty() && !models.contains(value)) {
+                        models = models + value
+                    }
+                    newModel = ""
+                },
+                enabled = newModel.isNotBlank()
+            ) {
+                Text("Add", color = Brand)
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        AppTextField(
+            apiKey,
+            { apiKey = it },
+            "API key (optional)",
+            visualTransformation = PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            supportingText = "Leave blank to use the first saved connection key."
+        )
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(
+            onClick = {
+                fetching = true
+                onDiscover(apiKey) { discovered ->
+                    fetching = false
+                    if (discovered != null) models = (models + discovered).distinct()
+                }
+            },
+            enabled = !fetching,
+            shape = MaterialTheme.shapes.small,
+            border = androidx.compose.foundation.BorderStroke(1.dp, AppBorder),
+            modifier = Modifier.fillMaxWidth().height(42.dp)
+        ) {
+            if (fetching) {
+                CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = Brand)
+            } else {
+                Icon(Icons.Filled.Refresh, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(15.dp))
+            }
+            Spacer(Modifier.width(6.dp))
+            Text(if (fetching) "Fetching…" else "Fetch from /models", color = TextSecondary)
+        }
+    }
+}
+
+@Composable
+private fun ProviderGroupHeader(spec: ProviderSpec, count: Int) {    Row(
         Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 2.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -384,6 +937,7 @@ private fun ConnectionCard(
 @Composable
 private fun AddConnectionDialog(
     initial: ProviderSpec,
+    options: List<ProviderSpec>,
     oauthBusy: Set<String>,
     onDismiss: () -> Unit,
     onOAuth: (providerId: String) -> Unit,
@@ -428,7 +982,7 @@ private fun AddConnectionDialog(
                 onDismissRequest = { pickerOpen = false },
                 modifier = Modifier.heightIn(max = 340.dp)
             ) {
-                ProviderCatalog.all.forEach { option ->
+                options.forEach { option ->
                     DropdownMenuItem(
                         text = {
                             Row(verticalAlignment = Alignment.CenterVertically) {

@@ -1,6 +1,6 @@
 import { ensureDirs, DATA_FILE } from "./paths.js";
 import { stripNullBytes } from "./helpers/nullBytes.js";
-import { pullFromBlob, pushToBlob, refreshFromBlobIfUpdated, hasBlobStorage } from "./blobSync.js";
+import { pullFromBlob, pushToBlob, refreshFromBlobIfUpdated, hasBlobStorage, remoteDbExists } from "./blobSync.js";
 
 // Use global to survive Next.js dev hot-reload (module state resets on reload)
 if (!global._dbAdapter) global._dbAdapter = { instance: null, initPromise: null, logged: false };
@@ -115,7 +115,9 @@ async function initAdapter() {
   // Seed the remote store only when it does not exist yet. Pushing on every
   // cold start lets a stale instance clobber newer data written by another
   // instance (last-write-wins), which is exactly how connections vanished.
-  if (hasBlobStorage() && !pulled) {
+  // Also never seed after a failed pull: a transient download error must not
+  // overwrite a remote database that is still there.
+  if (hasBlobStorage() && !pulled && !(await remoteDbExists())) {
     try {
       await pushToBlob(adapter);
     } catch (e) {
@@ -126,6 +128,31 @@ async function initAdapter() {
   return adapter;
 }
 
+let refreshing = false;
+
+/**
+ * Force a remote freshness check and reload the DB when another instance has
+ * written a newer snapshot. Used by the provider list endpoint and other
+ * read-after-write paths where a stale view is the visible bug.
+ */
+export async function refreshNow() {
+  if (!state.instance || !hasBlobStorage() || refreshing) return false;
+  refreshing = true;
+  try {
+    return await refreshFromBlobIfUpdated(
+      () => state.instance,
+      async () => {
+        state.instance = null;
+        state.initPromise = null;
+        await getAdapter();
+      },
+      { force: true }
+    );
+  } finally {
+    refreshing = false;
+  }
+}
+
 export async function getAdapter() {
   if (state.instance) {
     if (hasBlobStorage()) {
@@ -134,7 +161,7 @@ export async function getAdapter() {
         async () => {
           state.instance = null;
           state.initPromise = null;
-          return getAdapter();
+          await getAdapter();
         }
       );
     }

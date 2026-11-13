@@ -1,10 +1,11 @@
 import fs from "node:fs";
 import { DATA_FILE, ensureDirs } from "./paths.js";
 
+const BLOB_PATHNAME = "data.sqlite";
+
 let currentEtag = null;
 let lastCheckTime = 0;
-const CHECK_INTERVAL_MS = 2000;
-let pendingPush = null;
+const CHECK_INTERVAL_MS = 1000;
 
 export function hasBlobStorage() {
   return Boolean(process.env.BLOB_READ_WRITE_TOKEN);
@@ -14,47 +15,75 @@ export function getCurrentEtag() {
   return currentEtag;
 }
 
+function token() {
+  return process.env.BLOB_READ_WRITE_TOKEN;
+}
+
+/**
+ * Fetch the remote blob metadata with head() (strongly consistent), unlike
+ * list() which is eventually consistent and can report a stale etag right
+ * after another instance uploads a newer database.
+ */
+async function getRemoteMeta() {
+  const { head } = await import("@vercel/blob");
+  try {
+    return await head(BLOB_PATHNAME, { token: token() });
+  } catch (err) {
+    // head() throws a plain Error ("The requested blob does not exist") for a
+    // missing pathname instead of BlobNotFoundError.
+    if (/does not exist|not found/i.test(err?.message || "")) return null;
+    throw err;
+  }
+}
+
+/** True when a remote database exists (used to decide whether seeding is safe). */
+export async function remoteDbExists() {
+  if (!hasBlobStorage()) return false;
+  try {
+    return (await getRemoteMeta()) !== null;
+  } catch {
+    // On a failed probe assume it exists: pushing local state could wipe it.
+    return true;
+  }
+}
+
+async function downloadBlob(url) {
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${token()}` },
+  });
+  if (!res.ok) {
+    console.warn(`[BlobSync] Failed to download blob: HTTP ${res.status}`);
+    return null;
+  }
+  return Buffer.from(await res.arrayBuffer());
+}
+
 /**
  * Download data.sqlite from Vercel Blob store if present.
- * Returns true if downloaded, false otherwise.
+ * Returns true if a usable local copy exists afterwards, false otherwise.
  */
 export async function pullFromBlob() {
   if (!hasBlobStorage()) return false;
 
   try {
-    const { list } = await import("@vercel/blob");
-    const listRes = await list({
-      prefix: "data.sqlite",
-      token: process.env.BLOB_READ_WRITE_TOKEN,
-    });
-
-    const blob = listRes.blobs.find((b) => b.pathname === "data.sqlite");
-    if (!blob) {
+    const remote = await getRemoteMeta();
+    if (!remote) {
       console.log("[BlobSync] No existing data.sqlite in Blob storage.");
       return false;
     }
 
-    if (currentEtag && blob.etag === currentEtag && fs.existsSync(DATA_FILE)) {
+    if (currentEtag && remote.etag === currentEtag && fs.existsSync(DATA_FILE)) {
       return true;
     }
 
-    const res = await fetch(blob.url, {
-      headers: {
-        Authorization: `Bearer ${process.env.BLOB_READ_WRITE_TOKEN}`,
-      },
-    });
+    const buf = await downloadBlob(remote.url);
+    if (!buf) return false;
 
-    if (!res.ok) {
-      console.warn(`[BlobSync] Failed to download blob: HTTP ${res.status}`);
-      return false;
-    }
-
-    const buf = Buffer.from(await res.arrayBuffer());
     ensureDirs();
     fs.writeFileSync(DATA_FILE, buf);
-    currentEtag = blob.etag;
+    currentEtag = remote.etag;
     lastCheckTime = Date.now();
-    console.log(`[BlobSync] Pulled ${buf.length} bytes from Blob storage (${blob.pathname}, etag: ${blob.etag})`);
+    console.log(`[BlobSync] Pulled ${buf.length} bytes from Blob storage (etag: ${remote.etag})`);
     return true;
   } catch (err) {
     console.error("[BlobSync] pullFromBlob error:", err?.message || err);
@@ -88,11 +117,11 @@ export async function pushToBlob(adapter) {
     }
 
     const { put } = await import("@vercel/blob");
-    const putRes = await put("data.sqlite", buf, {
+    const putRes = await put(BLOB_PATHNAME, buf, {
       access: "private",
       addRandomSuffix: false,
       allowOverwrite: true,
-      token: process.env.BLOB_READ_WRITE_TOKEN,
+      token: token(),
     });
 
     currentEtag = putRes.etag;
@@ -107,38 +136,28 @@ export async function pushToBlob(adapter) {
 
 /**
  * Check if remote Blob storage has a newer version, and reload SQLite if needed.
+ * Pass { force: true } to bypass the throttle (used before writes and on the
+ * provider list endpoint, where showing a stale list right after an add is
+ * exactly the bug users see).
  */
-export async function refreshFromBlobIfUpdated(getAdapterInstance, reinitAdapter) {
+export async function refreshFromBlobIfUpdated(getAdapterInstance, reinitAdapter, options = {}) {
   if (!hasBlobStorage()) return false;
 
   const now = Date.now();
-  if (now - lastCheckTime < CHECK_INTERVAL_MS) return false;
+  if (!options.force && now - lastCheckTime < CHECK_INTERVAL_MS) return false;
   lastCheckTime = now;
 
   try {
-    const { list } = await import("@vercel/blob");
-    const listRes = await list({
-      prefix: "data.sqlite",
-      token: process.env.BLOB_READ_WRITE_TOKEN,
-    });
+    const remote = await getRemoteMeta();
+    if (!remote) return false;
 
-    const blob = listRes.blobs.find((b) => b.pathname === "data.sqlite");
-    if (!blob) return false;
-
-    if (currentEtag && blob.etag === currentEtag) {
+    if (currentEtag && remote.etag === currentEtag) {
       return false;
     }
 
-    console.log(`[BlobSync] Detected newer blob in remote storage (${blob.etag} vs ${currentEtag}), reloading...`);
-    const res = await fetch(blob.url, {
-      headers: {
-        Authorization: `Bearer ${process.env.BLOB_READ_WRITE_TOKEN}`,
-      },
-    });
-
-    if (!res.ok) return false;
-
-    const buf = Buffer.from(await res.arrayBuffer());
+    console.log(`[BlobSync] Detected newer blob in remote storage (${remote.etag} vs ${currentEtag}), reloading...`);
+    const buf = await downloadBlob(remote.url);
+    if (!buf) return false;
 
     const currentAdapter = getAdapterInstance ? getAdapterInstance() : null;
     if (currentAdapter && typeof currentAdapter.close === "function") {
@@ -149,7 +168,7 @@ export async function refreshFromBlobIfUpdated(getAdapterInstance, reinitAdapter
 
     ensureDirs();
     fs.writeFileSync(DATA_FILE, buf);
-    currentEtag = blob.etag;
+    currentEtag = remote.etag;
 
     if (reinitAdapter) {
       await reinitAdapter();

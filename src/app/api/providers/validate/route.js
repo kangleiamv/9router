@@ -460,8 +460,9 @@ export async function POST(request) {
 
         case "opencode-zen": {
           // Zen API keys (from https://opencode.ai/auth) are checked against a
-          // free keyed-lane model so validation never bills a paid one. A bad
-          // key returns 401; 402/403 can mean an authentic key without credit.
+          // free keyed-lane model so validation never bills a paid one. Only
+          // 401/403 mean the credential was rejected; other statuses (e.g. 400)
+          // still confirm upstream accepted the key.
           const res = await fetch("https://opencode.ai/zen/v1/chat/completions", {
             method: "POST",
             headers: {

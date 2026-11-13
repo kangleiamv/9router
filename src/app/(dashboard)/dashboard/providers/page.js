@@ -368,10 +368,9 @@ export default function ProvidersPage() {
   if (isApikeySearching || showAllApikey) {
     visibleApikeyEntries = apikeyEntries;
   } else {
-    visibleApikeyEntries = apikeyEntries.slice(0, APIKEY_INITIAL_VISIBLE);
-    for (const entry of apikeyEntries.slice(APIKEY_INITIAL_VISIBLE)) {
-      if (FEATURED_APIKEY_PROVIDERS.has(entry[0])) visibleApikeyEntries.push(entry);
-    }
+    const featured = apikeyEntries.filter(([key]) => FEATURED_APIKEY_PROVIDERS.has(key));
+    const rest = apikeyEntries.filter(([key]) => !FEATURED_APIKEY_PROVIDERS.has(key));
+    visibleApikeyEntries = [...featured, ...rest.slice(0, APIKEY_INITIAL_VISIBLE)];
   }
   const hiddenApikeyCount = apikeyEntries.length - visibleApikeyEntries.length;
 

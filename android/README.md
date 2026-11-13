@@ -31,7 +31,7 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 
 ## Build
 
-The project targets JDK 17, AGP 8.5.2, Gradle 8.7, Kotlin 1.9.24, compileSdk 34
+The project targets JDK 17, AGP 8.10.1, Gradle 8.14.3, Kotlin 2.1.21, compileSdk 36
 and minSdk 26.
 
 ### Locally
@@ -43,6 +43,14 @@ echo "sdk.dir=$ANDROID_HOME" > local.properties
 ```
 
 The APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`.
+
+On an arm64 Linux host the x86_64 `aapt2` shipped by the Android Gradle plugin
+cannot run. Pass a native arm64 build instead:
+
+```bash
+./gradlew :app:assembleDebug \
+  -Pandroid.aapt2FromMavenOverride=/path/to/arm64/aapt2
+```
 
 ### CI
 

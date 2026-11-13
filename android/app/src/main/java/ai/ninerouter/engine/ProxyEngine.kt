@@ -22,6 +22,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
@@ -120,14 +121,14 @@ class ProxyEngine(
                 if (FallbackPolicy.isUnavailable(connection)) continue
                 if (FallbackPolicy.isModelLockActive(connection, target.modelId)) continue
 
-                val call = runCatching {
+                val call = try {
                     UpstreamClient.call(
                         target.provider,
                         connection,
                         target.modelId,
                         ctx.copy(model = target.modelId)
                     )
-                }.getOrElse { error ->
+                } catch (error: Throwable) {
                     lastMessage = error.message ?: "Connection failed"
                     lastStatus = 502
                     continue

@@ -20,6 +20,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Article
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -164,7 +166,7 @@ fun UsageScreen(viewModel: MainViewModel) {
         if (filtered.isEmpty()) {
             item {
                 EmptyState(
-                    icon = androidx.compose.material.icons.Icons.Filled.Article,
+                    icon = Icons.Filled.Article,
                     title = "Nothing here yet",
                     body = "Requests appear after the gateway handles traffic. Try the quick test in Endpoint & Key."
                 )

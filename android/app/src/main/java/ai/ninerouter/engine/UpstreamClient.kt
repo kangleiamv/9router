@@ -403,49 +403,55 @@ object UpstreamClient {
                 ctx.raw["temperature"]?.let { put("temperature", it) }
                 ctx.raw["top_p"]?.let { put("topP", it) }
                 (ctx.raw.int("max_tokens") ?: ctx.raw.int("max_completion_tokens"))?.let { put("maxOutputTokens", it) }
-                ctx.raw.string("stop")?.let { putJsonArray("stopSequences") { add(it) } }
+                ctx.raw.string("stop")?.let { putJsonArray("stopSequences") { add(JsonPrimitive(it)) } }
             }
             put("tools", geminiTools(ctx.raw["tools"]))
         }
     }
 
-    private fun geminiParts(content: JsonElement?, toolCalls: JsonElement?): JsonArray = buildJsonArray {
-        when (content) {
-            is JsonArray -> content.forEach { part ->
-                when (part) {
-                    is JsonObject -> {
-                        if (part.string("type") == "image_url") {
-                            val parsed = parseDataUrl(part.obj("image_url")?.string("url").orEmpty())
-                            if (parsed != null) add(buildJsonObject {
-                                putJsonObject("inlineData") {
-                                    put("mimeType", parsed.first)
-                                    put("data", parsed.second)
-                                }
-                            })
-                        } else {
-                            add(buildJsonObject { put("text", part.string("text").orEmpty()) })
+    private fun geminiParts(content: JsonElement?, toolCalls: JsonElement?): JsonArray {
+        val parts = buildJsonArray {
+            when (content) {
+                is JsonArray -> content.forEach { part ->
+                    when (part) {
+                        is JsonObject -> {
+                            if (part.string("type") == "image_url") {
+                                val parsed = parseDataUrl(part.obj("image_url")?.string("url").orEmpty())
+                                if (parsed != null) add(buildJsonObject {
+                                    putJsonObject("inlineData") {
+                                        put("mimeType", parsed.first)
+                                        put("data", parsed.second)
+                                    }
+                                })
+                            } else {
+                                add(buildJsonObject { put("text", part.string("text").orEmpty()) })
+                            }
                         }
+                        is JsonPrimitive -> add(buildJsonObject { put("text", part.contentOrNull.orEmpty()) })
+                        else -> Unit
                     }
-                    is JsonPrimitive -> add(buildJsonObject { put("text", part.contentOrNull.orEmpty()) })
-                    else -> Unit
+                }
+                else -> {
+                    val text = contentText(content)
+                    if (text.isNotEmpty()) add(buildJsonObject { put("text", text) })
                 }
             }
-            else -> {
-                val text = contentText(content)
-                if (text.isNotEmpty()) add(buildJsonObject { put("text", text) })
+            (toolCalls as? JsonArray)?.forEach { callEl ->
+                val call = callEl as? JsonObject ?: return@forEach
+                val fn = call.obj("function") ?: return@forEach
+                add(buildJsonObject {
+                    putJsonObject("functionCall") {
+                        put("name", fn.string("name") ?: "tool")
+                        put("args", parseArguments(fn["arguments"]))
+                    }
+                })
             }
         }
-        (toolCalls as? JsonArray)?.forEach { callEl ->
-            val call = callEl as? JsonObject ?: return@forEach
-            val fn = call.obj("function") ?: return@forEach
-            add(buildJsonObject {
-                putJsonObject("functionCall") {
-                    put("name", fn.string("name") ?: "tool")
-                    put("args", parseArguments(fn["arguments"]))
-                }
-            })
+        return if (parts.isEmpty()) {
+            buildJsonArray { add(buildJsonObject { put("text", "") }) }
+        } else {
+            parts
         }
-        if (size == 0) add(buildJsonObject { put("text", "") })
     }
     private fun geminiTools(tools: JsonElement?): JsonArray {
         val array = tools as? JsonArray ?: return JsonArray(emptyList())

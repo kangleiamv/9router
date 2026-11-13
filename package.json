@@ -19,6 +19,12 @@
     "cli:pack": "npm --prefix cli run pack:cli",
     "cli:publish": "npm --prefix cli run publish:cli"
   },
+  "optionalDependencies": {
+    "@aws-sdk/credential-providers": "^3.1135.0",
+    "ajv": "^8.17.1",
+    "better-sqlite3": "^12.6.2",
+    "ws": "^8.18.0"
+  },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/modifiers": "^9.0.0",
@@ -50,13 +56,8 @@
     "sql.js": "^1.14.1",
     "undici": "^7.30.2",
     "uuid": "^13.0.0",
-    "zustand": "^5.0.10"
-  },
-  "optionalDependencies": {
-    "@aws-sdk/credential-providers": "^3.1135.0",
-    "ajv": "^8.17.1",
-    "better-sqlite3": "^12.6.2",
-    "ws": "^8.18.0"
+    "zustand": "^5.0.10",
+    "wreq-js": "^3.2.0"
   },
   "comment_better_sqlite3": "kept in optionalDependencies so npm install doesn't fail on systems without build tools — sql.js is used as fallback at runtime",
   "comment_aws_sdk_credential_providers": "kept in optionalDependencies (npm still installs these by default) and imported lazily in shared/awsCredentials.js — only AWS Bedrock connections using profile/SSO mode need it; static accessKeyId/secretAccessKey connections never load it",

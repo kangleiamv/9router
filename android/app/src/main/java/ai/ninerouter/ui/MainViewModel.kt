@@ -1,0 +1,374 @@
+package ai.ninerouter.ui
+
+import ai.ninerouter.core.AppContainer
+import ai.ninerouter.core.DashboardStats
+import ai.ninerouter.core.ProxyRuntime
+import ai.ninerouter.core.ProviderUsage
+import ai.ninerouter.data.model.ApiKey
+import ai.ninerouter.data.model.Combo
+import ai.ninerouter.data.model.ProviderConnection
+import ai.ninerouter.data.model.RequestDetail
+import ai.ninerouter.engine.ProviderCatalog
+import ai.ninerouter.engine.specificData
+import ai.ninerouter.service.ProxyForegroundService
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonPrimitive
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+
+class MainViewModel(application: Application) : AndroidViewModel(application) {
+    private val repo = AppContainer.repository
+
+    val connections: StateFlow<List<ProviderConnection>> =
+        repo.connections.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val combos: StateFlow<List<Combo>> =
+        repo.combos.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val keys: StateFlow<List<ApiKey>> =
+        repo.keys.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val requests: StateFlow<List<RequestDetail>> =
+        repo.requests.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    private val _settings = MutableStateFlow<Map<String, String>>(emptyMap())
+    val settings: StateFlow<Map<String, String>> = _settings.asStateFlow()
+
+    val running: StateFlow<Boolean> = ProxyRuntime.running
+    val port: StateFlow<Int> = ProxyRuntime.port
+    val lastError: StateFlow<String?> = ProxyRuntime.lastError
+
+    private val _busy = MutableStateFlow<Set<String>>(emptySet())
+    val busy: StateFlow<Set<String>> = _busy.asStateFlow()
+
+    private val _events = MutableSharedFlow<UiEvent>(extraBufferCapacity = 8)
+    val events = _events.asSharedFlow()
+
+    val stats: StateFlow<DashboardStats> = combine(repo.requests, repo.connections) { list, conns ->
+        val start = LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val today = list.filter { it.timestamp >= start }
+        val success = today.count { (it.status ?: 0) in 200..299 }
+        DashboardStats(
+            todayRequests = today.size,
+            todayTokens = today.sumOf { ((it.promptTokens ?: 0) + (it.completionTokens ?: 0)).toLong() },
+            successRate = if (today.isEmpty()) 0.0 else success * 100.0 / today.size,
+            avgLatencyMs = if (today.isEmpty()) 0 else today.sumOf { it.latencyMs ?: 0 } / today.size,
+            activeConnections = conns.count { it.isActive && it.testStatus != "unavailable" },
+            totalConnections = conns.size,
+            lockedConnections = conns.count {
+                ai.ninerouter.engine.FallbackPolicy.isUnavailable(it) ||
+                    ai.ninerouter.engine.FallbackPolicy.earliestModelLock(it) != null
+            }
+        )
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), DashboardStats())
+
+    val providerUsage: StateFlow<List<ProviderUsage>> =
+        combine(repo.requests, repo.connections) { list, conns ->
+            val start = LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+            val today = list.filter { it.timestamp >= start }
+            val grouped = today.groupBy { it.provider ?: "unknown" }.map { (provider, rows) ->
+                ProviderUsage(
+                    providerId = provider,
+                    name = ProviderCatalog.byId(provider)?.name ?: provider,
+                    requests = rows.size,
+                    tokens = rows.sumOf { ((it.promptTokens ?: 0) + (it.completionTokens ?: 0)).toLong() },
+                    errors = rows.count { (it.status ?: 0) >= 400 }
+                )
+            }.toMutableList()
+            conns.map { it.provider }.distinct().forEach { provider ->
+                if (grouped.none { it.providerId == provider }) {
+                    grouped += ProviderUsage(
+                        providerId = provider,
+                        name = ProviderCatalog.byId(provider)?.name ?: provider,
+                        requests = 0, tokens = 0, errors = 0
+                    )
+                }
+            }
+            grouped.sortedByDescending { it.requests }
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    init {
+        viewModelScope.launch {
+            runCatching { repo.seed() }
+            refreshSettings()
+        }
+    }
+
+    fun refreshSettings() {
+        viewModelScope.launch {
+            _settings.value = runCatching { repo.settingsMap() }.getOrDefault(emptyMap())
+        }
+    }
+
+    fun toggleProxy(run: Boolean) {
+        val context = getApplication<Application>()
+        if (run) ProxyForegroundService.start(context) else ProxyForegroundService.stop(context)
+    }
+
+    fun restartProxy() {
+        val context = getApplication<Application>()
+        viewModelScope.launch {
+            ProxyForegroundService.stop(context)
+            delay(700)
+            ProxyForegroundService.start(context)
+            emit("Restarting local gateway…")
+        }
+    }
+
+    fun saveSettingsAndRestart(values: Map<String, String>) {
+        val context = getApplication<Application>()
+        viewModelScope.launch {
+            runCatching {
+                values.forEach { (key, value) -> repo.putSetting(key, value) }
+                refreshSettings()
+            }.onFailure { emit(it.message ?: "Could not save settings", true) }
+            ProxyForegroundService.stop(context)
+            delay(700)
+            ProxyForegroundService.start(context)
+            emit("Settings saved · gateway restarting")
+        }
+    }
+
+    fun saveSettings(values: Map<String, String>, message: String? = null) {
+        viewModelScope.launch {
+            runCatching {
+                values.forEach { (key, value) -> repo.putSetting(key, value) }
+                refreshSettings()
+            }.onSuccess { if (message != null) emit(message) }
+                .onFailure { emit(it.message ?: "Could not save settings", true) }
+        }
+    }
+
+    fun addConnection(
+        providerId: String,
+        name: String,
+        apiKey: String,
+        email: String,
+        baseUrl: String,
+        advanced: String,
+        onDone: () -> Unit
+    ) {
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    val data = buildString {
+                        val parts = mutableListOf<String>()
+                        if (advanced.isNotBlank()) {
+                            parts += advanced.trim().removePrefix("{").removeSuffix("}")
+                        }
+                        if (providerId == "antigravity" && apiKey.isNotBlank() && !advanced.contains("accessToken")) {
+                            parts += "\"accessToken\":\"${apiKey.replace("\"", "\\\"")}\""
+                        }
+                        if (baseUrl.isNotBlank()) {
+                            parts += "\"baseUrl\":\"${baseUrl.trim().replace("\"", "\\\"")}\""
+                        }
+                        if (parts.isNotEmpty()) {
+                            append("{")
+                            append(parts.joinToString(","))
+                            append("}")
+                        }
+                    }
+                    repo.addConnection(
+                        providerId = providerId,
+                        name = name,
+                        apiKey = apiKey.ifBlank { null },
+                        email = email.ifBlank { null },
+                        authType = if (providerId == "antigravity") "oauth" else "apikey",
+                        providerSpecificData = data.ifBlank { null },
+                        baseUrl = baseUrl.ifBlank { null }
+                    )
+                }
+            }.onSuccess {
+                emit("${ProviderCatalog.byId(providerId)?.name ?: providerId} connection added")
+                onDone()
+            }.onFailure { emit(it.message ?: "Could not add connection", true) }
+        }
+    }
+
+    fun testConnection(connection: ProviderConnection) {
+        viewModelScope.launch {
+            setBusy(connection.id, true)
+            runCatching { withContext(Dispatchers.IO) { repo.testConnection(connection) } }
+                .onSuccess { (ok, message) -> emit(message, !ok) }
+                .onFailure { emit(it.message ?: "Test failed", true) }
+            setBusy(connection.id, false)
+        }
+    }
+
+    fun toggleConnection(connection: ProviderConnection) {
+        viewModelScope.launch {
+            runCatching {
+                repo.updateConnection(connection.copy(isActive = !connection.isActive))
+            }.onSuccess {
+                emit(if (connection.isActive) "Connection paused" else "Connection enabled")
+            }.onFailure { emit(it.message ?: "Update failed", true) }
+        }
+    }
+
+    fun deleteConnection(connection: ProviderConnection) {
+        viewModelScope.launch {
+            runCatching { repo.deleteConnection(connection.id) }
+                .onSuccess { emit("Connection deleted") }
+                .onFailure { emit(it.message ?: "Delete failed", true) }
+        }
+    }
+
+    fun saveConnection(
+        connection: ProviderConnection,
+        name: String,
+        defaultModel: String,
+        apiKey: String,
+        onDone: () -> Unit
+    ) {
+        viewModelScope.launch {
+            runCatching {
+                repo.updateConnection(
+                    connection.copy(
+                        name = name.ifBlank { connection.name },
+                        displayName = name.ifBlank { connection.displayName },
+                        defaultModel = defaultModel.ifBlank { connection.defaultModel },
+                        apiKey = if (apiKey.isBlank()) connection.apiKey
+                        else ai.ninerouter.util.Crypto.encrypt(apiKey)
+                    )
+                )
+            }.onSuccess {
+                emit("Connection updated")
+                onDone()
+            }.onFailure { emit(it.message ?: "Update failed", true) }
+        }
+    }
+
+    fun saveCombo(id: String?, name: String, models: List<String>, kind: String?, onDone: () -> Unit) {
+        if (name.isBlank() || models.isEmpty()) {
+            emit("Add a name and at least one model", true)
+            return
+        }
+        viewModelScope.launch {
+            runCatching { repo.saveCombo(id, name, models, kind) }
+                .onSuccess {
+                    emit("Combo saved")
+                    onDone()
+                }
+                .onFailure { emit(it.message ?: "Could not save combo", true) }
+        }
+    }
+
+    fun deleteCombo(combo: Combo) {
+        viewModelScope.launch {
+            runCatching { repo.deleteCombo(combo.id) }
+                .onSuccess { emit("Combo deleted") }
+                .onFailure { emit(it.message ?: "Delete failed", true) }
+        }
+    }
+
+    fun createKey(name: String, onDone: () -> Unit) {
+        viewModelScope.launch {
+            runCatching { repo.createKey(name) }
+                .onSuccess {
+                    emit("API key created")
+                    onDone()
+                }
+                .onFailure { emit(it.message ?: "Could not create key", true) }
+        }
+    }
+
+    fun deleteKey(key: ApiKey) {
+        viewModelScope.launch {
+            runCatching { repo.deleteKey(key.id) }
+                .onSuccess { emit("Key deleted") }
+                .onFailure { emit(it.message ?: "Delete failed", true) }
+        }
+    }
+
+    fun toggleKey(key: ApiKey) {
+        viewModelScope.launch {
+            runCatching { repo.setKeyActive(key, !key.isActive) }
+                .onSuccess { emit(if (key.isActive) "Key disabled" else "Key enabled") }
+                .onFailure { emit(it.message ?: "Update failed", true) }
+        }
+    }
+
+    fun clearCooldowns() {
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    repo.providerDao.getAll().forEach { connection ->
+                        val data = connection.specificData()
+                            .filterKeys {
+                                !it.startsWith(ai.ninerouter.engine.FallbackPolicy.MODEL_LOCK_PREFIX) &&
+                                    it != "rateLimitedUntil"
+                            }
+                        repo.updateConnection(
+                            connection.copy(
+                                testStatus = "active",
+                                lastError = null,
+                                errorCode = null,
+                                backoffLevel = 0,
+                                providerSpecificData = if (data.isEmpty()) null else
+                                    kotlinx.serialization.json.JsonObject(
+                                        data.mapValues { JsonPrimitive(it.value) }
+                                    ).toString()
+                            )
+                        )
+                    }
+                }
+            }.onSuccess { emit("Cooldowns cleared") }
+                .onFailure { emit(it.message ?: "Could not clear cooldowns", true) }
+        }
+    }
+
+    fun clearLogs() {
+        viewModelScope.launch {
+            runCatching { repo.clearRequests() }
+                .onSuccess { emit("Request log cleared") }
+                .onFailure { emit(it.message ?: "Could not clear log", true) }
+        }
+    }
+
+    fun pruneLogs(days: Int) {
+        viewModelScope.launch {
+            runCatching { repo.pruneOldRequests(days) }
+                .onSuccess { emit("Removed requests older than $days days") }
+                .onFailure { emit(it.message ?: "Cleanup failed", true) }
+        }
+    }
+
+    fun sendTelegramTest(token: String, chatId: String) {
+        viewModelScope.launch {
+            runCatching { withContext(Dispatchers.IO) { repo.sendTelegram(token, chatId, "✅ 9Router Android is connected.") } }
+                .onSuccess { (ok, message) -> emit(message, !ok) }
+                .onFailure { emit(it.message ?: "Telegram request failed", true) }
+        }
+    }
+
+    suspend fun defaultKey(): ApiKey? = withContext(Dispatchers.IO) { repo.defaultKey() }
+
+    fun models(): List<Triple<String, String, String>> = ProviderCatalog.modelsForSelection()
+
+    fun providers() = ProviderCatalog.all
+
+    private fun setBusy(id: String, value: Boolean) {
+        _busy.value = if (value) _busy.value + id else _busy.value - id
+    }
+
+    private fun emit(message: String, isError: Boolean = false) {
+        _events.tryEmit(UiEvent(message, isError))
+    }
+
+    data class UiEvent(val message: String, val isError: Boolean = false)
+}

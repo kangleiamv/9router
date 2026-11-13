@@ -1,0 +1,115 @@
+package ai.ninerouter.ui.components
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import ai.ninerouter.data.model.RequestDetail
+import ai.ninerouter.engine.ProviderCatalog
+import ai.ninerouter.ui.theme.AppBorder
+import ai.ninerouter.ui.theme.TextMuted
+import ai.ninerouter.ui.theme.TextPrimary
+import ai.ninerouter.ui.theme.TextSecondary
+
+@Composable
+fun RequestRow(
+    detail: RequestDetail,
+    modifier: Modifier = Modifier,
+    showTime: Boolean = true
+) {
+    val color = statusColor(detail.status)
+    val modelName = detail.model?.let { model ->
+        detail.provider?.let { provider -> ProviderCatalog.displayName(provider, model) } ?: model
+    } ?: "unknown"
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            Modifier
+                .size(7.dp)
+                .clip(CircleShape)
+                .background(color)
+        )
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    modelName,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = TextPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    detail.status?.toString() ?: "—",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = color
+                )
+            }
+            Spacer(Modifier.height(2.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    detail.provider ?: "local",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextMuted
+                )
+                if (showTime) {
+                    Text(" · ${formatRelative(detail.timestamp)}", style = MaterialTheme.typography.bodySmall, color = TextMuted)
+                }
+                if (detail.error != null) {
+                    Text(" · ${detail.error.take(48)}", style = MaterialTheme.typography.bodySmall, color = statusColor(500), maxLines = 1)
+                }
+            }
+        }
+        Spacer(Modifier.width(10.dp))
+        Column(horizontalAlignment = Alignment.End) {
+            Text(formatLatency(detail.latencyMs), style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+            val tokens = (detail.promptTokens ?: 0) + (detail.completionTokens ?: 0)
+            if (tokens > 0) {
+                Text("${formatCount(tokens)} tok", style = MaterialTheme.typography.labelSmall, color = TextMuted)
+            }
+        }
+    }
+}
+
+@Composable
+fun HairLine(modifier: Modifier = Modifier) {
+    Box(
+        modifier
+            .fillMaxWidth()
+            .height(1.dp)
+            .background(AppBorder.copy(alpha = 0.7f))
+    )
+}
+
+@Composable
+fun KeyValueRow(label: String, value: String) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(label, style = MaterialTheme.typography.bodySmall, color = TextMuted)
+        Text(value, style = MaterialTheme.typography.bodySmall, color = TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}

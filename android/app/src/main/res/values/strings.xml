@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">9Router</string>
+    <string name="proxy_channel_name">9Router Proxy</string>
+    <string name="proxy_channel_desc">Runs the local 9Router proxy engine</string>
+    <string name="proxy_notification_title">9Router proxy running</string>
+    <string name="proxy_notification_text">Listening on http://127.0.0.1:20127</string>
+</resources>

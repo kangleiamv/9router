@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="obsidian">#0A0A0C</color>
+    <color name="surface">#121215</color>
+    <color name="surface_high">#1A1A1F</color>
+    <color name="accent_orange">#E87040</color>
+    <color name="accent_emerald">#34D399</color>
+    <color name="accent_red">#F87171</color>
+    <color name="text_primary">#F4F4F5</color>
+    <color name="text_secondary">#A1A1AA</color>
+    <color name="ic_launcher_background">#0A0A0C</color>
+</resources>

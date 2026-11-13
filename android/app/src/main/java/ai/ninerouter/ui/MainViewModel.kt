@@ -9,9 +9,14 @@ import ai.ninerouter.data.model.Combo
 import ai.ninerouter.data.model.ProviderConnection
 import ai.ninerouter.data.model.RequestDetail
 import ai.ninerouter.engine.ProviderCatalog
+import ai.ninerouter.engine.oauth.OAuthClient
+import ai.ninerouter.engine.oauth.OAuthException
+import ai.ninerouter.engine.oauth.OAuthProviders
 import ai.ninerouter.engine.specificData
 import ai.ninerouter.service.ProxyForegroundService
 import android.app.Application
+import android.content.Intent
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
@@ -55,6 +60,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _busy = MutableStateFlow<Set<String>>(emptySet())
     val busy: StateFlow<Set<String>> = _busy.asStateFlow()
+
+    /** Provider ids with an OAuth browser sign-in currently in flight. */
+    private val _oauthBusy = MutableStateFlow<Set<String>>(emptySet())
+    val oauthBusy: StateFlow<Set<String>> = _oauthBusy.asStateFlow()
 
     private val _events = MutableSharedFlow<UiEvent>(extraBufferCapacity = 8)
     val events = _events.asSharedFlow()
@@ -188,7 +197,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         name = name,
                         apiKey = apiKey.ifBlank { null },
                         email = email.ifBlank { null },
-                        authType = if (providerId == "antigravity") "oauth" else "apikey",
+                        authType = if (ai.ninerouter.engine.oauth.OAuthProviders.supports(providerId)) "oauth" else "apikey",
                         providerSpecificData = data.ifBlank { null },
                         baseUrl = baseUrl.ifBlank { null }
                     )
@@ -197,6 +206,51 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 emit("${ProviderCatalog.byId(providerId)?.name ?: providerId} connection added")
                 onDone()
             }.onFailure { emit(it.message ?: "Could not add connection", true) }
+        }
+    }
+
+    /**
+     * Starts a real OAuth sign-in: opens the provider consent page in the
+     * browser and waits for the one-shot loopback callback on localhost.
+     */
+    fun connectOAuth(providerId: String, onDone: () -> Unit) {
+        val provider = OAuthProviders.byId(providerId)
+        if (provider == null) {
+            emit("${ProviderCatalog.byId(providerId)?.name ?: providerId} does not support OAuth sign-in", true)
+            return
+        }
+        if (_oauthBusy.value.contains(providerId)) return
+        viewModelScope.launch {
+            setOAuthBusy(providerId, true)
+            var session: ai.ninerouter.engine.oauth.OAuthSession? = null
+            try {
+                val started = withContext(Dispatchers.IO) { OAuthClient.start(provider) }
+                session = started
+                val opened = runCatching {
+                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(started.authUrl)).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    getApplication<Application>().startActivity(intent)
+                }
+                if (opened.isFailure) {
+                    started.close()
+                    session = null
+                    emit("No browser found. Open this link in a browser to sign in:\n${started.authUrl}", true)
+                    return@launch
+                }
+                emit("Finish the ${ProviderCatalog.byId(providerId)?.name ?: provider.providerId} sign-in in your browser…")
+                val tokens = withContext(Dispatchers.IO) { started.awaitTokens() }
+                val connection = repo.addOAuthConnection(providerId, tokens)
+                emit("${ProviderCatalog.byId(providerId)?.name ?: providerId} connected${connection.email?.let { " as $it" }.orEmpty()}")
+                onDone()
+            } catch (e: OAuthException) {
+                emit(e.message ?: "OAuth sign-in failed", true)
+            } catch (e: Exception) {
+                emit(e.message ?: "OAuth sign-in failed", true)
+            } finally {
+                runCatching { session?.close() }
+                setOAuthBusy(providerId, false)
+            }
         }
     }
 
@@ -364,6 +418,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun setBusy(id: String, value: Boolean) {
         _busy.value = if (value) _busy.value + id else _busy.value - id
+    }
+
+    private fun setOAuthBusy(id: String, value: Boolean) {
+        _oauthBusy.value = if (value) _oauthBusy.value + id else _oauthBusy.value - id
     }
 
     private fun emit(message: String, isError: Boolean = false) {

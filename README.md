@@ -97,6 +97,21 @@ Claude Code/Codex/OpenClaw/Cursor/Cline Settings:
 
 **That's it!** Start coding with FREE AI models.
 
+### 📱 Android app (native, no WebView)
+
+A full native Android port lives in [`android/`](./android). It is Kotlin +
+Jetpack Compose + Material 3 with the same Obsidian dashboard, an embedded
+Ktor gateway on `127.0.0.1:20127`, Room storage, provider/combo fallback,
+quota tracking and the Telegram bot. Every screen is Compose — there is no
+WebView and no demo build.
+
+Download the debug APK from
+[Releases](https://github.com/kangleiamv/9router/releases/tag/android-v1.1.0),
+then `adb install -r 9router-android-1.1.0-debug.apk` (or open the file on the
+device). Build instructions are in [`android/README.md`](./android/README.md).
+Antigravity, Gemini CLI and Claude Code can be connected with a real OAuth
+sign-in from the Providers screen.
+
 **Alternative: run from source (this repository):**
 
 This repository package is private (`9router-app`), so source/Docker execution is the expected local development path.

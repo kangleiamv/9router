@@ -9,6 +9,8 @@ import ai.ninerouter.engine.ChatContext
 import ai.ninerouter.engine.ProviderCatalog
 import ai.ninerouter.engine.ProviderSpec
 import ai.ninerouter.engine.UpstreamClient
+import ai.ninerouter.engine.oauth.OAuthTokens
+import ai.ninerouter.engine.specificData
 import ai.ninerouter.util.Crypto
 import ai.ninerouter.util.Ids
 import kotlinx.coroutines.Dispatchers
@@ -148,6 +150,64 @@ class AppRepository(context: android.content.Context) {
         )
         providerDao.upsert(connection)
         connection
+    }
+
+    /** Saves a connection produced by a completed OAuth sign-in. */
+    suspend fun addOAuthConnection(
+        providerId: String,
+        tokens: OAuthTokens
+    ): ProviderConnection = withContext(Dispatchers.IO) {
+        val spec = ProviderCatalog.byId(providerId)
+            ?: throw IllegalArgumentException("Unknown provider $providerId")
+        val now = Instant.now().toString()
+        val data = kotlinx.serialization.json.buildJsonObject {
+            put("accessToken", tokens.accessToken)
+            tokens.refreshToken?.let { put("refreshToken", it) }
+            tokens.expiresAt?.let { put("expiresAt", it.toString()) }
+            tokens.scope?.let { put("scope", it) }
+            tokens.projectId?.let { put("projectId", it) }
+            tokens.email?.let { put("email", it) }
+            put("oauthProvider", providerId)
+        }.toString()
+        val label = tokens.email ?: spec.name
+        val connection = ProviderConnection(
+            id = Ids.connectionId(),
+            provider = spec.id,
+            name = label,
+            email = tokens.email,
+            authType = "oauth",
+            apiKey = Crypto.encrypt(tokens.accessToken),
+            priority = nextPriority(spec.id),
+            isActive = true,
+            testStatus = null,
+            defaultModel = spec.models.firstOrNull()?.id,
+            displayName = label,
+            providerSpecificData = data,
+            createdAt = now,
+            updatedAt = now
+        )
+        providerDao.upsert(connection)
+        connection
+    }
+
+    /** Merges rotated OAuth tokens back into the stored connection. */
+    suspend fun persistRefreshedTokens(
+        connectionId: String,
+        values: Map<String, String>
+    ) = withContext(Dispatchers.IO) {
+        val connection = providerDao.getById(connectionId) ?: return@withContext
+        val merged = LinkedHashMap(connection.specificData())
+        values.forEach { (key, value) -> if (value.isNotBlank()) merged[key] = value }
+        val newAccess = values["accessToken"]
+        providerDao.upsert(
+            connection.copy(
+                apiKey = if (!newAccess.isNullOrBlank()) Crypto.encrypt(newAccess) else connection.apiKey,
+                providerSpecificData = kotlinx.serialization.json.buildJsonObject {
+                    merged.forEach { (key, value) -> put(key, value) }
+                }.toString(),
+                updatedAt = Instant.now().toString()
+            )
+        )
     }
 
     private suspend fun nextPriority(providerId: String): Int {

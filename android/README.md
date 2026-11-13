@@ -11,7 +11,8 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 | --- | --- |
 | Gateway | Ktor CIO on `127.0.0.1:20127`, OpenAI-compatible `/v1` API |
 | Storage | Room (`nine_router.db`), keys encrypted with Android Keystore AES-GCM |
-| Upstreams | OpenAI-compatible, Anthropic, Gemini, Antigravity and Ollama wire formats |
+| Upstreams | OpenAI-compatible, Anthropic, Gemini, Gemini CLI, Antigravity and Ollama wire formats |
+| OAuth | Browser sign-in for Antigravity, Gemini CLI and Claude Code with a one-shot loopback callback, PKCE for Claude, automatic token refresh |
 | Routing | Combos, vision combo, per-account fallback, exponential backoff, model locks |
 | Telegram | Bot API long polling inside the foreground service, `/help` `/model` `/combo` `/vision` `/status` `/quota` `/clear` |
 | UI | Compose Material 3, Obsidian dark theme, drawer navigation |
@@ -60,8 +61,11 @@ Artifacts). No signing secrets are required for the debug build.
 
 ## Install
 
+A debug-signed APK is published at
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.1.0>.
+
 ```bash
-adb install -r app-debug.apk
+adb install -r 9router-android-1.1.0-debug.apk
 ```
 
 Or download the artifact and open it on the device (allow install from unknown
@@ -69,8 +73,12 @@ sources for the file manager you use).
 
 ## Use
 
-1. Open **Providers** and add a connection. Paste an API key (or an Antigravity
-   access token / advanced JSON with `refreshToken` and `projectId`).
+1. Open **Providers** and add a connection. For Antigravity, Gemini CLI or
+   Claude Code tap **Sign in with Google/Claude**: the browser opens the
+   provider's consent page and the app catches the loopback callback on
+   `http://localhost:<port>/callback`. For any other provider paste an API key.
+   Manual tokens (access token, or advanced JSON with `refreshToken` and
+   `projectId`) still work as a fallback.
 2. Optionally create a combo in **Combo & Vision** — members are tried in order.
 3. The gateway starts automatically. Copy the base URL and an API key from
    **Endpoint & Key**.
@@ -108,5 +116,6 @@ cooling down (toggle in the Telegram screen).
   responses report upstream usage when the provider returns it.
 - Android may stop the foreground service under extreme battery pressure; the
   boot receiver re-arms it when auto-start is enabled.
-- Antigravity OAuth refresh is implemented, but the app never asks for a Google
-  password — supply tokens/refresh tokens explicitly.
+- OAuth sign-in uses the system browser and a random loopback port; no Google
+  or Anthropic password ever reaches the app. Tokens are stored encrypted and
+  refreshed automatically before they expire.

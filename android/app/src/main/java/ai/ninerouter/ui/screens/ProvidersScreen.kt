@@ -59,6 +59,7 @@ import ai.ninerouter.data.model.ProviderConnection
 import ai.ninerouter.engine.FallbackPolicy
 import ai.ninerouter.engine.ProviderCatalog
 import ai.ninerouter.engine.ProviderSpec
+import ai.ninerouter.engine.oauth.OAuthProviders
 import ai.ninerouter.ui.MainViewModel
 import ai.ninerouter.ui.components.AppCard
 import ai.ninerouter.ui.components.AppTextField
@@ -86,6 +87,7 @@ import kotlinx.coroutines.delay
 fun ProvidersScreen(viewModel: MainViewModel) {
     val connections by viewModel.connections.collectAsState()
     val busy by viewModel.busy.collectAsState()
+    val oauthBusy by viewModel.oauthBusy.collectAsState()
     var addProvider by remember { mutableStateOf<ProviderSpec?>(null) }
     var editing by remember { mutableStateOf<ProviderConnection?>(null) }
     var deleting by remember { mutableStateOf<ProviderConnection?>(null) }
@@ -181,7 +183,9 @@ fun ProvidersScreen(viewModel: MainViewModel) {
     addProvider?.let { spec ->
         AddConnectionDialog(
             initial = spec,
+            oauthBusy = oauthBusy,
             onDismiss = { addProvider = null },
+            onOAuth = { providerId -> viewModel.connectOAuth(providerId) { addProvider = null } },
             onAdd = { providerId, name, key, email, baseUrl, advanced ->
                 viewModel.addConnection(
                     providerId = providerId,
@@ -380,7 +384,9 @@ private fun ConnectionCard(
 @Composable
 private fun AddConnectionDialog(
     initial: ProviderSpec,
+    oauthBusy: Set<String>,
     onDismiss: () -> Unit,
+    onOAuth: (providerId: String) -> Unit,
     onAdd: (providerId: String, name: String, apiKey: String, email: String, baseUrl: String, advanced: String) -> Unit
 ) {
     var spec by remember { mutableStateOf(initial) }
@@ -391,6 +397,8 @@ private fun AddConnectionDialog(
     var advanced by remember { mutableStateOf("") }
     var reveal by remember { mutableStateOf(false) }
     var pickerOpen by remember { mutableStateOf(false) }
+    val oauth = OAuthProviders.byId(spec.id)
+    val signingIn = oauthBusy.contains(spec.id)
 
     DialogContent(
         title = "Add connection",
@@ -438,6 +446,36 @@ private fun AddConnectionDialog(
             }
         }
         Spacer(Modifier.height(10.dp))
+        if (oauth != null) {
+            PrimaryButton(
+                text = if (signingIn) "Waiting for browser…" else oauth.buttonLabel,
+                onClick = { onOAuth(spec.id) },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !signingIn
+            )
+            Spacer(Modifier.height(8.dp))
+            if (signingIn) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = Brand)
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "Complete the sign-in in your browser, then return to the app.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary
+                    )
+                }
+            } else {
+                Text(
+                    "Opens ${spec.name} in your browser and returns here automatically. " +
+                        "Tokens are encrypted with the Android Keystore on this device.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextMuted
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+            Text("Or connect manually", style = MaterialTheme.typography.labelMedium, color = TextMuted)
+            Spacer(Modifier.height(8.dp))
+        }
         AppTextField(name, { name = it }, "Display name", placeholder = spec.name)
         Spacer(Modifier.height(10.dp))
         AppTextField(
@@ -456,10 +494,10 @@ private fun AddConnectionDialog(
                     )
                 }
             },
-            supportingText = when (spec.id) {
-                "antigravity" -> "Paste a Google access token, or put refreshToken/projectId in Advanced JSON."
-                "opencode-zen" -> "Free models use the public inference lane and need no key."
-                "ollama" -> "No key needed for a local Ollama server."
+            supportingText = when {
+                oauth != null -> "Optional when you use the browser sign-in above."
+                spec.id == "opencode-zen" -> "Free models use the public inference lane and need no key."
+                spec.id == "ollama" -> "No key needed for a local Ollama server."
                 else -> null
             }
         )

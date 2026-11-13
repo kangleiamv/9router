@@ -1,6 +1,8 @@
 package ai.ninerouter.engine
 
 import ai.ninerouter.data.model.ProviderConnection
+import ai.ninerouter.engine.oauth.OAuthClient
+import ai.ninerouter.engine.oauth.OAuthProviders
 import ai.ninerouter.util.Crypto
 import ai.ninerouter.util.Ids
 import ai.ninerouter.util.Json
@@ -86,47 +88,41 @@ object UpstreamClient {
         .readTimeout(120, TimeUnit.SECONDS)
         .build()
 
+    /**
+     * Called on a background thread after an OAuth access token is refreshed so
+     * the new token (and any rotated refresh token) can be persisted.
+     */
+    @Volatile
+    var tokenRefreshSink: ((connectionId: String, tokens: Map<String, String>) -> Unit)? = null
+
     // ------------------------------------------------------------------ auth
 
     suspend fun resolveCredentials(connection: ProviderConnection): Map<String, String> {
         val data = connection.specificData().toMutableMap()
-        if (connection.provider == "antigravity") {
+        val key = Crypto.decrypt(connection.apiKey) ?: data["apiKey"]
+        if (!key.isNullOrBlank()) data["apiKey"] = key
+        if (data["accessToken"].isNullOrBlank() && !key.isNullOrBlank()) {
+            data["accessToken"] = key
+        }
+        val oauth = OAuthProviders.byId(connection.provider)
+        if (oauth != null) {
             val access = data["accessToken"]
             val refresh = data["refreshToken"]
             val expires = data["expiresAt"]?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrNull() } ?: 0L
             val expired = expires == 0L || expires - 60_000 < System.currentTimeMillis()
-            if (refresh != null && (access == null || expired)) {
-                refreshAntigravity(data, refresh)
-            }
-        }
-        val key = Crypto.decrypt(connection.apiKey) ?: data["apiKey"]
-        if (!key.isNullOrBlank()) data["apiKey"] = key
-        return data
-    }
-
-    private fun refreshAntigravity(data: MutableMap<String, String>, refreshToken: String) {
-        val body = buildJsonObject {
-            put("grant_type", "refresh_token")
-            put("client_id", "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com")
-            put("client_secret", "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")
-            put("refresh_token", refreshToken)
-        }
-        val request = Request.Builder()
-            .url("https://oauth2.googleapis.com/token")
-            .post(body.toString().toRequestBody(MEDIA_JSON))
-            .header("Content-Type", "application/json")
-            .build()
-        runCatching {
-            client.newCall(request).execute().use { response ->
-                val text = response.body?.string().orEmpty()
-                if (!response.isSuccessful) return@use
-                val json = Json.lenient.parseToJsonElement(text).jsonObject
-                json.string("access_token")?.let { data["accessToken"] = it }
-                (json["expires_in"] as? JsonPrimitive)?.contentOrNull?.toLongOrNull()?.let {
-                    data["expiresAt"] = Instant.now().plusSeconds(it).toString()
+            if (!refresh.isNullOrBlank() && (access.isNullOrBlank() || expired)) {
+                val refreshed = OAuthClient.refresh(oauth, refresh)
+                if (refreshed != null) {
+                    data["accessToken"] = refreshed.accessToken
+                    data["apiKey"] = refreshed.accessToken
+                    refreshed.refreshToken?.let { data["refreshToken"] = it }
+                    refreshed.expiresAt?.let { data["expiresAt"] = it.toString() }
+                    refreshed.scope?.let { data["scope"] = it }
+                    tokenRefreshSink?.invoke(connection.id, data.toMap())
                 }
             }
         }
+        return data
     }
 
     // ------------------------------------------------------------------ call
@@ -154,6 +150,7 @@ object UpstreamClient {
             )
             WireFormat.ANTHROPIC -> anthropicRequest(spec, baseUrl, creds, upstreamModel, ctx)
             WireFormat.GEMINI -> geminiRequest(spec, baseUrl, creds, upstreamModel, ctx)
+            WireFormat.GEMINI_CLI -> geminiCliRequest(spec, baseUrl, creds, upstreamModel, ctx)
             WireFormat.ANTIGRAVITY -> antigravityRequest(spec, baseUrl, creds, connection, upstreamModel, ctx)
         }
         val response = runCatching { client.newCall(request).execute() }
@@ -188,6 +185,18 @@ object UpstreamClient {
                 headers["x-api-key"] = key
                 headers["anthropic-version"] = "2023-06-01"
                 headers.remove("Authorization")
+            }
+            "claude" -> {
+                headers["Authorization"] = "Bearer ${creds["accessToken"] ?: key}"
+                headers["anthropic-version"] = "2023-06-01"
+                headers["anthropic-beta"] =
+                    "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14," +
+                        "context-management-2025-06-27,prompt-caching-scope-2026-01-05," +
+                        "advanced-tool-use-2025-11-20,effort-2025-11-24,structured-outputs-2025-12-15," +
+                        "fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28"
+                headers["User-Agent"] = "claude-cli/2.1.322 (external, sdk-cli)"
+                headers["x-app"] = "cli"
+                headers.remove("x-api-key")
             }
             else -> headers["Authorization"] = "Bearer $key"
         }
@@ -290,8 +299,9 @@ object UpstreamClient {
             val toolArray = anthropicTools(ctx.raw["tools"])
             if (toolArray.isNotEmpty()) put("tools", toolArray)
         }
+        val url = if (spec.id == "claude") "$baseUrl/messages?beta=true" else "$baseUrl/messages"
         val builder = Request.Builder()
-            .url(baseUrl + "/messages")
+            .url(url)
             .post(payload.toString().toRequestBody(MEDIA_JSON))
         authHeaders(spec, creds).forEach { (k, v) -> builder.header(k, v) }
         return builder.build()
@@ -368,6 +378,34 @@ object UpstreamClient {
         val payload = geminiPayload(ctx)
         val builder = Request.Builder().url(url).post(payload.toString().toRequestBody(MEDIA_JSON))
         builder.header("Content-Type", "application/json")
+        return builder.build()
+    }
+
+    private fun geminiCliRequest(
+        spec: ProviderSpec,
+        baseUrl: String,
+        creds: Map<String, String>,
+        upstreamModel: String,
+        ctx: ChatContext
+    ): Request {
+        val project = creds["projectId"].orEmpty()
+        if (project.isBlank()) {
+            throw UpstreamException("Gemini CLI connection has no Cloud project. Reconnect the account in Providers.")
+        }
+        val action = if (ctx.stream) ":streamGenerateContent?alt=sse" else ":generateContent"
+        val payload = buildJsonObject {
+            put("project", project)
+            put("model", upstreamModel)
+            put("request", geminiPayload(ctx))
+        }
+        val builder = Request.Builder()
+            .url(baseUrl + action)
+            .post(payload.toString().toRequestBody(MEDIA_JSON))
+            .header("Content-Type", "application/json")
+            .header("Authorization", "Bearer ${creds["accessToken"].orEmpty()}")
+            .header("User-Agent", "google-genai-sdk/1.41.0 gl-node/v22.19.0")
+            .header("X-Goog-Api-Client", "gl-node/22.19.0")
+            .header("Accept", if (ctx.stream) "text/event-stream" else "application/json")
         return builder.build()
     }
 
@@ -536,6 +574,7 @@ object UpstreamClient {
             WireFormat.OPENAI, WireFormat.OLLAMA -> raw
             WireFormat.ANTHROPIC -> anthropicToOpenAi(prepared, raw, requestModel)
             WireFormat.GEMINI -> geminiToOpenAi(prepared, raw, requestModel, wrapped = false)
+            WireFormat.GEMINI_CLI -> geminiToOpenAi(prepared, raw, requestModel, wrapped = true)
             WireFormat.ANTIGRAVITY -> geminiToOpenAi(prepared, raw, requestModel, wrapped = true)
         }
     }
@@ -702,8 +741,12 @@ object UpstreamClient {
                     else -> ""
                 }
             }
-            WireFormat.GEMINI, WireFormat.ANTIGRAVITY -> {
-                val root = if (format == WireFormat.ANTIGRAVITY) json.obj("response") ?: json else json
+            WireFormat.GEMINI, WireFormat.GEMINI_CLI, WireFormat.ANTIGRAVITY -> {
+                val root = if (format == WireFormat.ANTIGRAVITY || format == WireFormat.GEMINI_CLI) {
+                    json.obj("response") ?: json
+                } else {
+                    json
+                }
                 val candidate = (root["candidates"] as? JsonArray)?.firstOrNull() as? JsonObject
                 candidate?.obj("content")?.arr("parts")
                     ?.mapNotNull { (it as? JsonObject)?.string("text") }
@@ -716,8 +759,12 @@ object UpstreamClient {
     private fun extractFinish(format: WireFormat, json: JsonObject): String? {
         return when (format) {
             WireFormat.ANTHROPIC -> json.obj("delta")?.string("stop_reason") ?: json.string("stop_reason")
-            WireFormat.GEMINI, WireFormat.ANTIGRAVITY -> {
-                val root = if (format == WireFormat.ANTIGRAVITY) json.obj("response") ?: json else json
+            WireFormat.GEMINI, WireFormat.GEMINI_CLI, WireFormat.ANTIGRAVITY -> {
+                val root = if (format == WireFormat.ANTIGRAVITY || format == WireFormat.GEMINI_CLI) {
+                    json.obj("response") ?: json
+                } else {
+                    json
+                }
                 ((root["candidates"] as? JsonArray)?.firstOrNull() as? JsonObject)?.string("finishReason")
             }
             else -> null

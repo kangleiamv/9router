@@ -5,7 +5,7 @@ package ai.ninerouter.engine
  * level: each entry declares the wire format, the default base URL and the models
  * that the dashboard can offer.
  */
-enum class WireFormat { OPENAI, ANTHROPIC, GEMINI, ANTIGRAVITY, OLLAMA }
+enum class WireFormat { OPENAI, ANTHROPIC, GEMINI, GEMINI_CLI, ANTIGRAVITY, OLLAMA }
 
 data class ModelSpec(
     val id: String,
@@ -290,9 +290,54 @@ object ProviderCatalog {
         )
     )
 
+    val geminiCli = ProviderSpec(
+        id = "gemini-cli",
+        name = "Gemini CLI",
+        alias = "gc",
+        format = WireFormat.GEMINI_CLI,
+        baseUrl = "https://cloudcode-pa.googleapis.com/v1internal",
+        authType = "oauth",
+        category = "oauth",
+        color = "#4285F4",
+        website = "https://github.com/google-gemini/gemini-cli",
+        models = listOf(
+            m("gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview"),
+            m("gemini-3-pro-preview", "Gemini 3 Pro Preview"),
+            m("gemini-3-flash-preview", "Gemini 3 Flash Preview"),
+            m("gemini-3.1-flash-lite-preview", "Gemini 3.1 Flash Lite Preview"),
+            m("gemini-2.5-pro", "Gemini 2.5 Pro"),
+            m("gemini-2.5-flash", "Gemini 2.5 Flash"),
+            m("gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite")
+        )
+    )
+
+    val claude = ProviderSpec(
+        id = "claude",
+        name = "Claude Code",
+        alias = "cc",
+        format = WireFormat.ANTHROPIC,
+        baseUrl = "https://api.anthropic.com/v1",
+        chatPath = "/messages",
+        authType = "oauth",
+        category = "oauth",
+        color = "#D97757",
+        website = "https://claude.ai",
+        models = listOf(
+            m("claude-fable-5-2", "Claude Fable 5.2"),
+            m("claude-opus-5-5", "Claude Opus 5.5"),
+            m("claude-opus-5", "Claude Opus 5"),
+            m("claude-fable-5", "Claude Fable 5"),
+            m("claude-sonnet-5-5", "Claude Sonnet 5.5"),
+            m("claude-sonnet-5", "Claude Sonnet 5"),
+            m("claude-haiku-5-5", "Claude Haiku 5.5"),
+            m("claude-haiku-4-5-20251001", "Claude 4.5 Haiku")
+        )
+    )
+
     val all: List<ProviderSpec> = listOf(
-        antigravity, opencodeZen, openai, anthropic, gemini, openrouter, groq,
-        deepseek, xai, mistral, together, fireworks, cerebras, nvidia, ollama
+        antigravity, claude, geminiCli, opencodeZen, openai, anthropic, gemini,
+        openrouter, groq, deepseek, xai, mistral, together, fireworks, cerebras,
+        nvidia, ollama
     )
 
     fun byId(id: String): ProviderSpec? =

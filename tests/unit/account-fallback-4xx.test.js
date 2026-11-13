@@ -19,9 +19,21 @@ describe("checkFallbackError — request-scoped vs account-scoped failures", () 
   });
 
   it("still falls back for account-scoped statuses", () => {
-    for (const status of [401, 402, 403, 404, 429]) {
+    for (const status of [401, 402, 403, 429]) {
       expect(checkFallbackError(status, "nope").shouldFallback).toBe(true);
     }
+  });
+
+  // Regression: a 404 ("Requested entity was not found.") is the request's fault
+  // (unknown model id / missing deployment), not the credential's. Locking the
+  // account for it made a single bad model id poison every later request with the
+  // same upstream 404 for the whole cooldown window.
+  it("does not cool the account down for a 404 from an unknown model", () => {
+    const result = checkFallbackError(404, JSON.stringify({
+      error: { code: 404, message: "Requested entity was not found.", status: "NOT_FOUND" },
+    }));
+
+    expect(result).toEqual({ shouldFallback: false, cooldownMs: 0, requestScoped: true });
   });
 
   it("still honours rate-limit / quota wording on any 4xx", () => {

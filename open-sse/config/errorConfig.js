@@ -80,7 +80,12 @@ export const ERROR_RULES = [
   { status: 401, cooldownMs: COOLDOWN.long },
   { status: 402, cooldownMs: COOLDOWN.long },
   { status: 403, cooldownMs: COOLDOWN.long },
-  { status: 404, cooldownMs: COOLDOWN.long },
+  // 404 is intentionally NOT listed: it means "this model/entity does not exist"
+  // (unknown model id, missing Azure deployment, or a provider whose catalog has
+  // drifted past a model the account can no longer use). That is a property of the
+  // request, not of the credential, so locking the account hides the real cause
+  // behind a 2-minute "unavailable" cooldown for every later request.
+  // Unmatched 4xx → request-scoped in checkFallbackError().
   { status: 429, backoff: true },
 ];
 

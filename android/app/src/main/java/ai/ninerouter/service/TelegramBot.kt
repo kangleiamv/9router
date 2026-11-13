@@ -245,7 +245,10 @@ class TelegramBot(private val repo: AppRepository) {
                     } else {
                         connection.provider
                     }
-                    spec?.models?.firstOrNull()?.let { "$prefix/${it.id}" }
+                    val model = connection.defaultModel
+                        ?: spec?.defaultModel
+                        ?: spec?.models?.firstOrNull()?.id
+                    model?.let { "$prefix/$it" }
                 }.orEmpty()
         }
         if (route.isBlank()) {

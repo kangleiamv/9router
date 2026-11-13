@@ -63,10 +63,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.2.0>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.2.1>.
 
 ```bash
-adb install -r 9router-android-1.2.0-debug.apk
+adb install -r 9router-android-1.2.1-debug.apk
 ```
 
 Or download the artifact and open it on the device (allow install from unknown
@@ -98,6 +98,25 @@ From a desktop over USB:
 adb forward tcp:20127 tcp:20127
 curl http://127.0.0.1:20127/v1/models
 ```
+
+### Antigravity 404: "Requested entity was not found"
+
+Google returns this 404 both for a missing/stale Cloud Code project and for a
+model that is not enabled for the account. The app handles it as follows:
+
+- The Code Assist project is resolved at request time (or reused from the
+  connection) and a missing project id is never sent as an empty string.
+- If the upstream still answers with that exact 404, the project is refreshed
+  once and the request is retried with the repaired id.
+- **Test** retries the credential on `gemini-3.8-flash-medium` when the
+  connection's selected model is unavailable, switches the connection default
+  to the model that worked, and reports the change.
+- Catalog tier suffixes such as `gemini-4-carbon-high(high)` are stripped before
+  the wire request; the tier is sent as `thinkingConfig.thinkingLevel`, and the
+  client uses the current `antigravity/hub/2.24.0` fingerprint.
+
+If a client request still returns the 404, select `gemini-3.8-flash-medium` as
+the model in that client (the model the web dashboard uses by default).
 
 ## Custom providers (OpenAI/Anthropic compatible)
 

@@ -1103,7 +1103,7 @@ private fun EditConnectionDialog(
         Spacer(Modifier.height(12.dp))
         AppTextField(name, { name = it }, "Display name")
         Spacer(Modifier.height(10.dp))
-        AppTextField(model, { model = it }, "Default model", placeholder = spec?.models?.firstOrNull()?.id)
+        AppTextField(model, { model = it }, "Default model", placeholder = spec?.defaultModel ?: spec?.models?.firstOrNull()?.id)
         Spacer(Modifier.height(10.dp))
         AppTextField(
             value = apiKey,

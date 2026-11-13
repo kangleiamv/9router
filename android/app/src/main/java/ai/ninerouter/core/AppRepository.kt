@@ -12,6 +12,7 @@ import ai.ninerouter.engine.ChatContext
 import ai.ninerouter.engine.ProviderCatalog
 import ai.ninerouter.engine.ProviderSpec
 import ai.ninerouter.engine.UpstreamClient
+import ai.ninerouter.engine.WireFormat
 import ai.ninerouter.engine.oauth.OAuthTokens
 import ai.ninerouter.engine.specificData
 import ai.ninerouter.util.Crypto
@@ -160,7 +161,7 @@ class AppRepository(context: android.content.Context) {
             priority = nextPriority(spec.id),
             isActive = true,
             testStatus = null,
-            defaultModel = spec.models.firstOrNull()?.id,
+            defaultModel = spec.defaultModel ?: spec.models.firstOrNull()?.id,
             displayName = name.ifBlank { spec.name },
             providerSpecificData = mergeData(
                 providerSpecificData,
@@ -201,7 +202,7 @@ class AppRepository(context: android.content.Context) {
             priority = nextPriority(spec.id),
             isActive = true,
             testStatus = null,
-            defaultModel = spec.models.firstOrNull()?.id,
+            defaultModel = spec.defaultModel ?: spec.models.firstOrNull()?.id,
             displayName = label,
             providerSpecificData = data,
             createdAt = now,
@@ -491,10 +492,40 @@ class AppRepository(context: android.content.Context) {
             val spec = ProviderCatalog.byId(connection.provider)
                 ?: customProviderDao.getById(connection.provider)?.let(ProviderCatalog::customSpec)
                 ?: return@withContext false to "Unknown provider"
-            val model = connection.defaultModel ?: spec.models.firstOrNull()?.id ?: "default"
-            val result = UpstreamClient.testConnection(spec, connection, model)
+            // Use the stored row so tokens or a project id persisted by another
+            // coroutine are not overwritten by this test.
+            val current = providerDao.getById(connection.id) ?: connection
+            val model = current.defaultModel
+                ?: spec.defaultModel
+                ?: spec.models.firstOrNull()?.id
+                ?: "default"
+            var result = UpstreamClient.testConnection(spec, current, model)
+            var repairedModel: String? = null
+            // Antigravity uses the same 404 for a model that is in the catalog
+            // but not enabled for the account. Verify the credential on the
+            // provider's known-good model before declaring the connection broken.
+            if (!result.first && spec.format == WireFormat.ANTIGRAVITY &&
+                UpstreamClient.isUnknownEntityMessage(result.second)
+            ) {
+                val fallback = spec.defaultModel
+                if (!fallback.isNullOrBlank() && !fallback.equals(model, ignoreCase = true)) {
+                    val retry = UpstreamClient.testConnection(spec, current, fallback)
+                    result = when {
+                        retry.first -> {
+                            repairedModel = fallback
+                            true to
+                                "Connected · $fallback (selected $model is unavailable for this account)"
+                        }
+                        UpstreamClient.isUnknownEntityMessage(retry.second) -> false to
+                            "${retry.second} · neither $model nor $fallback is enabled for this account"
+                        else -> retry
+                    }
+                }
+            }
+            val latest = providerDao.getById(connection.id) ?: current
             providerDao.upsert(
-                connection.copy(
+                latest.copy(
+                    defaultModel = repairedModel ?: latest.defaultModel,
                     testStatus = if (result.first) "active" else "error",
                     lastError = if (result.first) null else result.second,
                     lastErrorAt = if (result.first) null else Instant.now().toString(),

@@ -208,11 +208,53 @@ object OAuthClient {
         kind: CodeAssistKind,
         accessToken: String
     ): String? {
+        val projectId = resolveProjectId(kind, accessToken)
+        if (projectId.isNullOrBlank()) {
+            throw OAuthException(
+                "No Google Cloud project found for this account. Enable Gemini Code Assist for the account and try again."
+            )
+        }
+        return projectId
+    }
+
+    /**
+     * Resolves the Cloud project for a Code Assist OAuth account. Unlike
+     * [loadCodeAssist] this never throws: request-time repair uses it so a
+     * connection with a missing or stale project can recover on its own.
+     */
+    fun resolveProjectId(kind: CodeAssistKind, accessToken: String): String? {
+        if (accessToken.isBlank()) return null
         val metadata = buildJsonObject {
             put("ideType", 9)
-            put("platform", 4)
+            put("platform", platformEnum())
             put("pluginType", 2)
         }
+        val loaded = loadCodeAssistJson(kind, accessToken, metadata)
+        val projectId = loaded?.let { extractProjectId(it) }
+        if (!projectId.isNullOrBlank()) return projectId
+
+        val tierId = loaded?.arr("allowedTiers")
+            ?.mapNotNull { it as? JsonObject }
+            ?.firstOrNull { (it["isDefault"] as? JsonPrimitive)?.contentOrNull == "true" }
+            ?.string("id")
+            ?.trim()
+            ?: "legacy-tier"
+
+        for (attempt in 0 until 4) {
+            val onboarded = runCatching { onboard(accessToken, tierId, metadata) }.getOrNull()
+            val finalProject = onboarded?.let { extractProjectId(it) }
+            if (!finalProject.isNullOrBlank()) return finalProject
+            if (onboarded?.boolean("done") == true) break
+            if (attempt < 3) runCatching { Thread.sleep(2_500) }
+        }
+        return null
+    }
+
+    private fun loadCodeAssistJson(
+        kind: CodeAssistKind,
+        accessToken: String,
+        metadata: JsonObject
+    ): JsonObject? {
         val loadPayload = buildJsonObject {
             put("metadata", metadata)
             if (kind == CodeAssistKind.GEMINI_CLI) put("mode", 1)
@@ -229,39 +271,17 @@ object OAuthClient {
             loadBuilder.header("X-Goog-Api-Client", "google-cloud-sdk vscode_cloudshelleditor/0.1")
             loadBuilder.header("Client-Metadata", metadata.toString())
         }
-        val loaded = runCatching {
+        return runCatching {
             http.newCall(loadBuilder.build()).execute().use { response ->
                 if (!response.isSuccessful) return@use null
                 Json.lenient.parseToJsonElement(response.body?.string().orEmpty()).jsonObject
             }
         }.getOrNull()
+    }
 
-        var projectId = loaded?.let { extractProjectId(it) }
-        val tierId = loaded?.arr("allowedTiers")
-            ?.mapNotNull { it as? JsonObject }
-            ?.firstOrNull { (it["isDefault"] as? JsonPrimitive)?.contentOrNull == "true" }
-            ?.string("id")
-            ?.trim()
-            ?: "legacy-tier"
-
-        if (kind == CodeAssistKind.ANTIGRAVITY && !projectId.isNullOrBlank()) {
-            for (attempt in 0 until 6) {
-                val onboarded = runCatching { onboard(accessToken, tierId, metadata) }.getOrNull()
-                val finalProject = onboarded?.let { extractProjectId(it) }
-                if (!finalProject.isNullOrBlank()) {
-                    projectId = finalProject
-                    break
-                }
-                if (onboarded?.boolean("done") == true) break
-                if (attempt < 5) runCatching { Thread.sleep(2_500) }
-            }
-        }
-        if (projectId.isNullOrBlank()) {
-            throw OAuthException(
-                "No Google Cloud project found for this account. Enable Gemini Code Assist for the account and try again."
-            )
-        }
-        return projectId
+    private fun platformEnum(): Int {
+        val arch = System.getProperty("os.arch").orEmpty().lowercase()
+        return if (arch.contains("aarch64") || arch.contains("arm64")) 4 else 3
     }
 
     private fun onboard(accessToken: String, tierId: String, metadata: JsonObject): JsonObject? {

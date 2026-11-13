@@ -17,7 +17,6 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
@@ -124,7 +123,57 @@ object UpstreamClient {
                 }
             }
         }
+        val codeAssistKind = when (connection.provider) {
+            "antigravity" -> ai.ninerouter.engine.oauth.CodeAssistKind.ANTIGRAVITY
+            "gemini-cli" -> ai.ninerouter.engine.oauth.CodeAssistKind.GEMINI_CLI
+            else -> null
+        }
+        if (codeAssistKind != null) {
+            ensureProject(connection, codeAssistKind, data)
+        }
         return data
+    }
+
+    /** Project lookups are cached as a failure backoff so a broken account does not stall every request. */
+    private val projectLookupBlockedUntil = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /** Recently resolved project ids, so an immediate retry does not hit loadCodeAssist again. */
+    private val resolvedProjects = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /**
+     * Ensures an Antigravity/Gemini CLI connection has a Cloud project. Older
+     * connections and manually imported access tokens often have none, which
+     * makes Google answer `404 Requested entity was not found.` to every call.
+     * The resolved id is persisted through [tokenRefreshSink].
+     */
+    private suspend fun ensureProject(
+        connection: ProviderConnection,
+        kind: ai.ninerouter.engine.oauth.CodeAssistKind,
+        data: MutableMap<String, String>,
+        force: Boolean = false
+    ): String? {
+        val existing = data["projectId"].orEmpty()
+        if (!force && existing.isNotBlank()) return existing
+        if (!force) resolvedProjects[connection.id]?.let {
+            data["projectId"] = it
+            return it
+        }
+        val now = System.currentTimeMillis()
+        if (!force && (projectLookupBlockedUntil[connection.id] ?: 0L) > now) return null
+        val access = data["accessToken"].orEmpty()
+        if (access.isBlank()) return null
+        val resolved = withContext(Dispatchers.IO) {
+            OAuthClient.resolveProjectId(kind, access)
+        }
+        if (resolved.isNullOrBlank()) {
+            projectLookupBlockedUntil[connection.id] = now + 5 * 60_000L
+            return null
+        }
+        projectLookupBlockedUntil.remove(connection.id)
+        resolvedProjects[connection.id] = resolved
+        data["projectId"] = resolved
+        tokenRefreshSink?.invoke(connection.id, mapOf("projectId" to resolved))
+        return resolved
     }
 
     // ------------------------------------------------------------------ call
@@ -136,7 +185,7 @@ object UpstreamClient {
         ctx: ChatContext,
         baseUrlOverride: String? = null
     ): PreparedCall {
-        val creds = resolveCredentials(connection)
+        val creds = resolveCredentials(connection).toMutableMap()
         val upstreamModel = ProviderCatalog.upstreamModel(spec.id, modelId)
         val baseUrl = baseUrlOverride?.trimEnd('/')?.takeIf { it.isNotBlank() }
             ?: when {
@@ -146,7 +195,7 @@ object UpstreamClient {
                 else -> spec.baseUrl
             }
             ?: throw UpstreamException("Provider ${spec.id} has no base URL configured")
-        val request = when (spec.format) {
+        fun buildRequest(): Request = when (spec.format) {
             WireFormat.OPENAI, WireFormat.OLLAMA -> openAiRequest(
                 spec, baseUrl, creds, upstreamModel, ctx
             )
@@ -155,8 +204,30 @@ object UpstreamClient {
             WireFormat.GEMINI_CLI -> geminiCliRequest(spec, baseUrl, creds, upstreamModel, ctx)
             WireFormat.ANTIGRAVITY -> antigravityRequest(spec, baseUrl, creds, connection, upstreamModel, ctx)
         }
-        val response = runCatching { client.newCall(request).execute() }
-            .getOrElse { throw UpstreamException("Connection to ${spec.name} failed: ${it.message}") }
+        fun execute(request: Request): Response =
+            runCatching { client.newCall(request).execute() }
+                .getOrElse { throw UpstreamException("Connection to ${spec.name} failed: ${it.message}") }
+
+        var response = execute(buildRequest())
+        // A missing or stale Cloud project makes Google answer 404 with this
+        // exact message. Re-resolve the project once and retry instead of
+        // surfacing a dead connection to the client. Google also returns this
+        // 404 for a model that is not enabled for the account, so only retry
+        // when the lookup produced a different project id.
+        if (spec.format == WireFormat.ANTIGRAVITY && isUnknownEntityResponse(response)) {
+            val previous = creds["projectId"].orEmpty()
+            val resolved = ensureProject(
+                connection,
+                ai.ninerouter.engine.oauth.CodeAssistKind.ANTIGRAVITY,
+                creds,
+                force = true
+            )
+            if (resolved != null && resolved != previous) {
+                runCatching { response.close() }
+                creds["projectId"] = resolved
+                response = execute(buildRequest())
+            }
+        }
         return PreparedCall(
             provider = spec,
             model = modelId,
@@ -168,6 +239,17 @@ object UpstreamClient {
             )
         )
     }
+
+    /** True for Google's generic "unknown project/model" 404 from Code Assist. */
+    fun isUnknownEntityResponse(response: Response): Boolean {
+        if (response.code != 404) return false
+        val body = runCatching { response.peekBody(32 * 1024).string() }.getOrDefault("")
+        return isUnknownEntityMessage(body)
+    }
+
+    /** Matches the raw message inside [isUnknownEntityResponse] for test results. */
+    fun isUnknownEntityMessage(text: String): Boolean =
+        text.contains("Requested entity was not found", ignoreCase = true)
 
     private fun authHeaders(spec: ProviderSpec, creds: Map<String, String>): MutableMap<String, String> {
         val headers = mutableMapOf("Content-Type" to "application/json", "Accept" to "application/json")
@@ -531,19 +613,49 @@ object UpstreamClient {
         upstreamModel: String,
         ctx: ChatContext
     ): Request {
-        val project = creds["projectId"].orEmpty()
+        val project = creds["projectId"].orEmpty().ifBlank { Ids.generatedProjectId() }
         val sessionId = creds["sessionId"] ?: connection.id
+        // Catalog entries encode the thinking tier as a "(high|medium|low)"
+        // suffix. Google only knows the clean model id; the suffix becomes a
+        // thinkingConfig entry, exactly like the web executor.
+        val wireModel = antigravityWireModel(upstreamModel)
+        val thinkingLevel = antigravityThinkingLevel(upstreamModel)
+            ?.takeIf { wireModel.contains("gemini", ignoreCase = true) }
         val requestBody = geminiPayload(ctx)
         // Antigravity expects the Gemini payload nested under `request`, with its own wrapper.
         val inner = buildJsonObject {
-            requestBody.forEach { (k, v) -> put(k, v) }
+            requestBody.forEach { (key, value) ->
+                if (key == "generationConfig" && thinkingLevel != null) {
+                    val generationConfig = value as? JsonObject
+                    put("generationConfig", buildJsonObject {
+                        generationConfig?.forEach { (configKey, configValue) ->
+                            put(configKey, configValue)
+                        }
+                        // Gemini thinking needs room for its reasoning budget.
+                        val floor = when (thinkingLevel) {
+                            "minimal" -> 4_096
+                            "low" -> 8_192
+                            "medium" -> 16_384
+                            else -> 64_000
+                        }
+                        val requested = (generationConfig?.get("maxOutputTokens") as? JsonPrimitive)
+                            ?.intOrNull ?: 0
+                        if (requested < floor) put("maxOutputTokens", floor)
+                        putJsonObject("thinkingConfig") {
+                            put("thinkingLevel", thinkingLevel)
+                            put("includeThoughts", thinkingLevel != "minimal")
+                        }
+                    })
+                } else {
+                    put(key, value)
+                }
+            }
             put("sessionId", sessionId)
         }
         val payload = buildJsonObject {
             put("project", project)
-            put("model", upstreamModel)
+            put("model", wireModel)
             put("userAgent", "antigravity")
-            put("requestType", "agent")
             put("requestId", "agent/${connection.id}/${System.currentTimeMillis()}/${Ids.requestId()}/1")
             put("request", inner)
         }
@@ -553,11 +665,26 @@ object UpstreamClient {
             .post(payload.toString().toRequestBody(MEDIA_JSON))
         builder.header("Content-Type", "application/json")
         builder.header("Authorization", "Bearer ${creds["accessToken"].orEmpty()}")
-        builder.header("User-Agent", "antigravity/1.15.8 darwin/arm64")
+        // Google rejects newer Antigravity models (Gemini 4 Carbon/Argon) with
+        // 404 "Requested entity was not found" when the client fingerprint is
+        // old. Match the current web/IDE hub fingerprint.
+        builder.header("User-Agent", "antigravity/hub/2.24.0 darwin/arm64")
         return builder.build()
     }
 
     // -------------------------------------------------------------- helpers
+
+    private val antigravityTierSuffix = Regex("\\(([^()]+)\\)\\s*$")
+
+    /** Removes the catalog's `(high|medium|low)` tier marker from a wire model id. */
+    fun antigravityWireModel(upstreamModel: String): String =
+        upstreamModel.replace(antigravityTierSuffix, "").trim()
+
+    /** Extracts the thinking tier encoded in a catalog model id, if any. */
+    fun antigravityThinkingLevel(upstreamModel: String): String? =
+        antigravityTierSuffix.find(upstreamModel)
+            ?.groupValues?.getOrNull(1)?.trim()?.lowercase()
+            ?.takeIf { it in setOf("high", "medium", "low", "minimal") }
 
     private fun parseArguments(raw: JsonElement?): JsonElement {
         val text = (raw as? JsonPrimitive)?.contentOrNull

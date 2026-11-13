@@ -29,7 +29,9 @@ data class ProviderSpec(
     val category: String = "apikey",
     val color: String = "#E87040",
     val website: String? = null,
-    val models: List<ModelSpec> = emptyList()
+    val models: List<ModelSpec> = emptyList(),
+    /** Preferred model for new connections; falls back to the first catalog entry. */
+    val defaultModel: String? = null
 ) {
     val allAliases: List<String>
         get() = listOfNotNull(id, alias, name.lowercase().replace(" ", "-")).distinct()
@@ -56,19 +58,37 @@ object ProviderCatalog {
             m("gemini-4-carbon-high", "Gemini 4 Carbon (High)", "gemini-4-carbon-high(high)"),
             m("gemini-4-carbon-medium", "Gemini 4 Carbon (Medium)", "gemini-4-carbon-medium(medium)"),
             m("gemini-4-carbon-low", "Gemini 4 Carbon (Low)", "gemini-4-carbon-low(low)"),
+            m("gemini-4-carbon", "Gemini 4 Carbon", "gemini-4-carbon-medium(medium)"),
+            m("gemini-4-argon-high", "Gemini 4 Argon (High)", "gemini-4-argon-high(high)"),
+            m("gemini-4-argon-medium", "Gemini 4 Argon (Medium)", "gemini-4-argon-medium(medium)"),
+            m("gemini-4-argon-low", "Gemini 4 Argon (Low)", "gemini-4-argon-low(low)"),
             m("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)", "gemini-3.8-flash-high(high)"),
             m("gemini-3.8-flash-medium", "Gemini 3.8 Flash (Medium)", "gemini-3.8-flash-medium(medium)"),
             m("gemini-3.8-flash-low", "Gemini 3.8 Flash (Low)", "gemini-3.8-flash-low(low)"),
+            m("gemini-3.8-flash", "Gemini 3.8 Flash", "gemini-3.8-flash-medium(medium)"),
             m("gemini-3.7-flash-high", "Gemini 3.7 Flash (High)", "gemini-3.7-flash-tiered(high)"),
             m("gemini-3.7-flash-medium", "Gemini 3.7 Flash (Medium)", "gemini-3.7-flash-tiered(medium)"),
             m("gemini-3.7-flash-low", "Gemini 3.7 Flash (Low)", "gemini-3.7-flash-tiered(low)"),
+            m("gemini-3.6-flash-high", "Gemini 3.6 Flash (High)", "gemini-3.6-flash-tiered(high)"),
+            m("gemini-3.6-flash-medium", "Gemini 3.6 Flash (Medium)", "gemini-3.6-flash-tiered(medium)"),
+            m("gemini-3.6-flash-low", "Gemini 3.6 Flash (Low)", "gemini-3.6-flash-tiered(low)"),
             m("gemini-3.1-pro-high", "Gemini 3.1 Pro (High)", "gemini-pro-agent"),
+            m("gemini-pro-agent", "Gemini 3.1 Pro (High)", "gemini-pro-agent"),
             m("gemini-3.1-pro-low", "Gemini 3.1 Pro (Low)", "gemini-3.1-pro-low(low)"),
+            m("claude-sonnet-5-5-high", "Claude Sonnet 5.5 (High)", "claude-sonnet-5-5-high(high)"),
+            m("claude-sonnet-5-5-medium", "Claude Sonnet 5.5 (Medium)", "claude-sonnet-5-5-medium(medium)"),
+            m("claude-sonnet-5-5-low", "Claude Sonnet 5.5 (Low)", "claude-sonnet-5-5-low(low)"),
+            m("claude-sonnet-5-5", "Claude Sonnet 5.5 (Thinking)", "claude-sonnet-5-5-high(high)"),
+            m("claude-opus-5-5-high", "Claude Opus 5.5 (High)", "claude-opus-5-5-high(high)"),
+            m("claude-opus-5-5-medium", "Claude Opus 5.5 (Medium)", "claude-opus-5-5-medium(medium)"),
+            m("claude-opus-5-5-low", "Claude Opus 5.5 (Low)", "claude-opus-5-5-low(low)"),
+            m("claude-opus-5-5", "Claude Opus 5.5 (Thinking)", "claude-opus-5-5-high(high)"),
             m("claude-sonnet-4-6", "Claude Sonnet 4.6 (Thinking)"),
             m("claude-opus-4-6-thinking", "Claude Opus 4.6 (Thinking)"),
             m("gpt-oss-120b-medium", "GPT-OSS 120B (Medium)"),
             m("gemini-3.1-flash-image", "Gemini 3.1 Flash (Image)", kind = "image")
-        )
+        ),
+        defaultModel = "gemini-3.8-flash-medium"
     )
 
     val opencodeZen = ProviderSpec(

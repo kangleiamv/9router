@@ -8,6 +8,7 @@ import { getExecutor } from "open-sse/executors/index.js";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { USAGE_APIKEY_PROVIDERS } from "@/shared/constants/providers";
 import { isLeaseConnection } from "open-sse/services/minimaxCodeLease.js";
+import { notifyLowQuotaFromUsage } from "@/lib/telegram/quota.js";
 
 // Detect auth-expired messages returned by usage providers instead of throwing
 const AUTH_EXPIRED_PATTERNS = ["expired", "authentication", "unauthorized", "401", "re-authorize"];
@@ -196,6 +197,10 @@ export async function GET(request, { params }) {
         console.warn(`[Usage] ${connection.provider}: force refresh failed: ${retryError.message}`);
       }
     }
+
+    // Telegram quota alert (fail-open, rate-limited). Awaiting keeps the send
+    // alive on serverless runtimes; it is a no-op unless a quota is low.
+    await notifyLowQuotaFromUsage(connection, usage);
 
     return Response.json(usage);
   } catch (error) {

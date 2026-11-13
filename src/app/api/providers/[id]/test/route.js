@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { testSingleConnection } from "./testUtils.js";
+import { getProviderConnectionById } from "@/lib/localDb";
+import { notifyConnectionError } from "@/lib/telegram/notify.js";
 
 // POST /api/providers/[id]/test - Test connection
 export async function POST(request, { params }) {
@@ -9,6 +11,16 @@ export async function POST(request, { params }) {
 
     if (result.error === "Connection not found") {
       return NextResponse.json({ error: "Connection not found" }, { status: 404 });
+    }
+
+    // Telegram alert on failure (fail-open; cooldown inside the notifier).
+    if (!result.valid && result.error) {
+      try {
+        const connection = await getProviderConnectionById(id);
+        await notifyConnectionError(connection || { id }, result.error);
+      } catch {
+        // Never let a notification affect the test result.
+      }
     }
 
     return NextResponse.json({

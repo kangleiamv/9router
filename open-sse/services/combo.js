@@ -348,6 +348,9 @@ export function isZeroContentResponse(data) {
  * @param {string} [options.smartPolicy="smart"] - Policy: "smart" (adaptive ≥80%), "strict" (lock 1st model), "per-turn", or "custom"
  * @param {boolean} [options.sessionSticky=true] - Keep chosen model across session requests to retain prompt cache
  * @param {number} [options.confidenceThreshold=0.8] - Minimum confidence required for model switch (0-1)
+ * @param {Function|null} [options.onFallback=null] - Fail-open observer called as
+ *   ({ comboName, failedModel, reason, status, nextModel }) whenever a member
+ *   fails and the combo advances. Must never throw; return value is ignored.
  * @param {Function|null} [options.resolveSmartChoice=null] - Smart router resolver callback: (body, models) => Promise<{ choice, probabilities, confidence } | null>
  * @returns {Promise<Response>}
  */
@@ -365,6 +368,7 @@ export async function handleComboChat({
   sessionSticky = true,
   confidenceThreshold = 0.8,
   resolveSmartChoice = null,
+  onFallback = null,
 }) {
   let rotatedModels = models;
   let activeStickyModel = null;
@@ -468,6 +472,18 @@ export async function handleComboChat({
   let lastStatus = null;
   let requestScopedResult = null;
 
+  // Fail-open observer hook. Kept here (not in a notification module) so the SSE
+  // engine stays provider-agnostic: callers wire their own notifier.
+  const reportFallback = (failedModel, reason, status, nextModel) => {
+    if (typeof onFallback !== "function") return;
+    try {
+      const pending = onFallback({ comboName, failedModel, reason, status, nextModel });
+      if (pending && typeof pending.catch === "function") pending.catch(() => {});
+    } catch {
+      // An observer must never break routing.
+    }
+  };
+
   for (let i = 0; i < rotatedModels.length; i++) {
     const modelStr = rotatedModels[i];
     log.info("COMBO", `Trying model ${i + 1}/${rotatedModels.length}: ${modelStr}`);
@@ -511,6 +527,7 @@ export async function handleComboChat({
                   }
                   lastError = "Zero usable content";
                   lastStatus = 200;
+                  reportFallback(modelStr, "zero usable content", 200, rotatedModels[i + 1] || null);
                   continue;
                 }
               } catch {
@@ -546,6 +563,7 @@ export async function handleComboChat({
         peeked.response.body?.cancel?.().catch(() => {});
         lastError = `empty generation (${reasonLabel})`;
         if (!lastStatus) lastStatus = 502;
+        reportFallback(modelStr, lastError, result.status, rotatedModels[i + 1] || null);
         continue;
       }
 
@@ -596,6 +614,7 @@ export async function handleComboChat({
         lastError = errorText || String(result.status);
         if (!lastStatus) lastStatus = result.status;
         if (!requestScopedResult) requestScopedResult = result;
+        reportFallback(modelStr, lastError, result.status, rotatedModels[i + 1] || null);
         continue;
       }
 
@@ -611,6 +630,7 @@ export async function handleComboChat({
       // Fallback to next model
       lastError = errorText || String(result.status);
       if (!lastStatus) lastStatus = result.status;
+      reportFallback(modelStr, lastError, result.status, rotatedModels[i + 1] || null);
       log.warn("COMBO", `Model ${modelStr} failed, trying next`, { status: result.status });
     } catch (error) {
       // Catch unexpected exceptions to ensure fallback continues
@@ -619,6 +639,7 @@ export async function handleComboChat({
       }
       lastError = error.message || String(error);
       if (!lastStatus) lastStatus = 500;
+      reportFallback(modelStr, lastError, 500, rotatedModels[i + 1] || null);
       log.warn("COMBO", `Model ${modelStr} threw error, trying next`, { error: lastError });
     }
   }

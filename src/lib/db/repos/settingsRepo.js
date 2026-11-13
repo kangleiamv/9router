@@ -68,6 +68,21 @@ const DEFAULT_SETTINGS = {
   pxpipeTimeoutMs: 15000,
   // Per-provider user header overrides applied at dispatch: { [providerId]: { headers: {..} } }
   providerOverrides: {},
+  // Telegram bot bridge (dashboard page: /dashboard/telegram).
+  // Enabled on demand; the bot is an OpenAI-style client of this same proxy.
+  telegram: {
+    enabled: false,
+    botToken: "",
+    webhookSecret: "",
+    allowedChatIds: [],
+    defaultModel: "",
+    systemPrompt: "",
+    historyLimit: 12,
+    notifyQuota: true,
+    notifyErrors: true,
+    notifyCombos: true,
+    quotaThreshold: 20,
+  },
 };
 
 async function readRaw() {

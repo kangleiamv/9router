@@ -1,0 +1,90 @@
+import { after } from "next/server";
+import { getSettings } from "@/lib/localDb";
+import { normalizeTelegramConfig, isTelegramConfigured } from "@/lib/telegram/config.js";
+import { handleTelegramUpdate } from "@/lib/telegram/handler.js";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+// Longest model turn the bot may run after the 200 has already been returned.
+export const maxDuration = 60;
+
+// Telegram retries a webhook when it does not get a 2xx quickly. Dedupe by
+// update key so a retry (or a manual replay) cannot double-answer a chat.
+const SEEN_TTL_MS = 10 * 60 * 1000;
+const seenUpdates = new Map();
+
+function updateKey(update) {
+  if (update?.update_id !== undefined) return `u:${update.update_id}`;
+  const message = update?.message || update?.edited_message || update?.callback_query?.message;
+  if (message?.chat?.id && message?.message_id) return `m:${message.chat.id}:${message.message_id}`;
+  return null;
+}
+
+function isDuplicate(key) {
+  if (!key) return false;
+  const now = Date.now();
+  const seenAt = seenUpdates.get(key);
+  if (seenAt && now - seenAt < SEEN_TTL_MS) return true;
+  seenUpdates.set(key, now);
+  if (seenUpdates.size > 500) {
+    for (const [k, t] of seenUpdates) {
+      if (now - t > SEEN_TTL_MS) seenUpdates.delete(k);
+    }
+  }
+  return false;
+}
+
+export async function POST(request) {
+  let cfg;
+  try {
+    cfg = normalizeTelegramConfig(await getSettings());
+  } catch (error) {
+    console.warn("[telegram] webhook: cannot read settings:", error?.message || error);
+    return Response.json({ ok: false, error: "Settings unavailable" }, { status: 500 });
+  }
+
+  if (!isTelegramConfigured(cfg)) {
+    return Response.json({ ok: false, error: "Telegram bot is not enabled" }, { status: 403 });
+  }
+
+  // Telegram echoes the secret_token given to setWebhook in this header.
+  if (cfg.webhookSecret) {
+    const provided = request.headers.get("x-telegram-bot-api-secret-token") || "";
+    if (provided !== cfg.webhookSecret) {
+      return Response.json({ ok: false, error: "Invalid webhook secret" }, { status: 401 });
+    }
+  }
+
+  let update;
+  try {
+    update = await request.json();
+  } catch {
+    return Response.json({ ok: false, error: "Invalid JSON" }, { status: 400 });
+  }
+
+  const key = updateKey(update);
+  if (isDuplicate(key)) return Response.json({ ok: true, duplicate: true });
+
+  const task = async () => {
+    try {
+      await handleTelegramUpdate(cfg, update);
+    } catch (error) {
+      console.warn("[telegram] update handling failed:", error?.message || error);
+    }
+  };
+
+  // Answer Telegram immediately, then run the (possibly slow) model call with
+  // the runtime's post-response budget. If `after` is unavailable or rejects
+  // the callback, finish inline so the update is never dropped.
+  try {
+    if (typeof after === "function") {
+      after(task);
+      return Response.json({ ok: true });
+    }
+  } catch {
+    // Fall through to inline handling.
+  }
+
+  await task();
+  return Response.json({ ok: true });
+}

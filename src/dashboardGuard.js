@@ -31,6 +31,11 @@ const PUBLIC_API_PATHS = [
   "/api/auth/saml",
   "/api/version",
   "/api/settings/require-login",
+  // Telegram bot callbacks: the webhook is secured by the bot's secret token
+  // header, the cron job by the Vercel cron header / CRON_SECRET. The rest of
+  // /api/telegram/* (setup, test) stays behind dashboard auth.
+  "/api/telegram/webhook",
+  "/api/telegram/cron",
 ];
 
 // Public top-level prefixes (LLM API endpoints with their own API key auth).

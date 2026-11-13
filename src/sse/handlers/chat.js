@@ -28,6 +28,7 @@ import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
 import { getKeyAccessContext, enforceKeyAccess, filterAdapterModels } from "../services/keyAccess.js";
 import { resolveSmartChoice } from "../services/systemoneRouter.js";
+import { notifyComboFallback } from "@/lib/telegram/notify.js";
 
 /**
  * Handle chat completion request
@@ -162,6 +163,7 @@ export async function handleChat(request, clientRawRequest = null) {
             log,
           })
         : null,
+      onFallback: notifyComboFallback,
     });
   }
 
@@ -180,7 +182,8 @@ export async function handleChat(request, clientRawRequest = null) {
       ),
       log,
       comboName: modelStr,
-      comboStrategy: getActiveAdapterStrategy(requiredCapabilities, settings)
+      comboStrategy: getActiveAdapterStrategy(requiredCapabilities, settings),
+      onFallback: notifyComboFallback,
     });
   }
 

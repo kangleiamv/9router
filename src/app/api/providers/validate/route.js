@@ -458,6 +458,30 @@ export async function POST(request) {
           break;
         }
 
+        case "opencode-zen": {
+          // Zen API keys (from https://opencode.ai/auth) are checked against a
+          // free keyed-lane model so validation never bills a paid one. A bad
+          // key returns 401; 402/403 can mean an authentic key without credit.
+          const res = await fetch("https://opencode.ai/zen/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${apiKey}`,
+              "x-opencode-client": "desktop",
+              "User-Agent": "opencode/1.18.31",
+            },
+            body: JSON.stringify({
+              model: PROVIDERS["opencode-zen"]?.validationModel || getDefaultModel("ocz"),
+              messages: [{ role: "user", content: "ping" }],
+              max_tokens: 1,
+              stream: false,
+            }),
+            signal: AbortSignal.timeout(10000),
+          });
+          isValid = res.status !== 401 && res.status !== 403;
+          break;
+        }
+
         case "commandcode": {
           const cfg = PROVIDERS.commandcode;
           const model = getDefaultModel("commandcode");

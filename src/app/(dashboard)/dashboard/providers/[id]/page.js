@@ -1549,7 +1549,34 @@ export default function ProviderDetailPage() {
 
       {/* Connections */}
       {isFreeNoAuth ? (
-        <NoAuthProxyCard providerId={providerId} />
+        <>
+          <NoAuthProxyCard providerId={providerId} />
+          {providerId === "opencode" && (
+            <Card>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex min-w-0 items-start gap-3">
+                  <div className="inline-flex size-10 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
+                    <span className="material-symbols-outlined text-[20px]">key</span>
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium">Have an OpenCode Zen API key?</p>
+                    <p className="text-xs text-text-muted">
+                      Connect it as OpenCode Zen to use your own key on the same models — paid and free keyed tiers. Keys
+                      are available at opencode.ai/auth.
+                    </p>
+                  </div>
+                </div>
+                <Link
+                  href="/dashboard/providers/opencode-zen"
+                  className="inline-flex h-7 shrink-0 items-center justify-center gap-2 rounded-[8px] bg-brand-500 px-3 text-xs font-semibold text-white shadow-sm transition-all hover:bg-brand-600"
+                >
+                  <span className="material-symbols-outlined text-[18px]">add</span>
+                  Connect OpenCode Zen
+                </Link>
+              </div>
+            </Card>
+          )}
+        </>
       ) : (
         <Card>
           <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">

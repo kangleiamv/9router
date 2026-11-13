@@ -95,6 +95,9 @@ function getConnectionErrorTag(connection) {
 }
 
 const APIKEY_INITIAL_VISIBLE = 20;
+// OpenCode's keyed providers sort past the initial slice; keep them visible so
+// users with an OpenCode key can connect without expanding "Show all".
+const FEATURED_APIKEY_PROVIDERS = new Set(["opencode-zen", "opencode-go"]);
 
 export default function ProvidersPage() {
   const [connections, setConnections] = useState([]);
@@ -361,11 +364,16 @@ export default function ProvidersPage() {
       return (a.name || "").localeCompare(b.name || "");
     });
   const isApikeySearching = !!searchQuery.trim() || statusFilter !== "all";
-  const visibleApikeyEntries =
-    isApikeySearching || showAllApikey
-      ? apikeyEntries
-      : apikeyEntries.slice(0, APIKEY_INITIAL_VISIBLE);
-  const hiddenApikeyCount = apikeyEntries.length - APIKEY_INITIAL_VISIBLE;
+  let visibleApikeyEntries;
+  if (isApikeySearching || showAllApikey) {
+    visibleApikeyEntries = apikeyEntries;
+  } else {
+    visibleApikeyEntries = apikeyEntries.slice(0, APIKEY_INITIAL_VISIBLE);
+    for (const entry of apikeyEntries.slice(APIKEY_INITIAL_VISIBLE)) {
+      if (FEATURED_APIKEY_PROVIDERS.has(entry[0])) visibleApikeyEntries.push(entry);
+    }
+  }
+  const hiddenApikeyCount = apikeyEntries.length - visibleApikeyEntries.length;
 
   // Web Cookie: providers authenticated by a pasted browser/session cookie
   // (connections are stored with authType "cookie" — see POST /api/providers).

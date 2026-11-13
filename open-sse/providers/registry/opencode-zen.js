@@ -21,6 +21,9 @@ export default {
   transport: {
     baseUrl: "https://opencode.ai/zen/v1/chat/completions",
     headers: {},
+    // Cheapest keyed-lane model used to verify an API key without spending on
+    // a paid model. A bad key is rejected with 401 before inference starts.
+    validationModel: "deepseek-v4-flash-free",
     usage: {
       url: "https://opencode.ai/zen/v1/usage",
     },

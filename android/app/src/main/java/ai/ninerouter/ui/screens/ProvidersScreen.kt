@@ -619,7 +619,9 @@ private fun CompatibleProviderDialog(
                         checking = false
                         checkResult = result
                         if (result.ok && result.models.isNotEmpty()) {
-                            modelsText = result.models.joinToString(", ")
+                            modelsText = (models + result.models)
+                                .distinct()
+                                .joinToString(", ")
                         }
                     }
                 },
@@ -807,8 +809,8 @@ private fun ConnectionCard(
     onEdit: () -> Unit,
     onDelete: () -> Unit
 ) {
-    val coolingUntil = FallbackPolicy.earliestModelLock(connection)
-    val cooling = coolingUntil != null && coolingUntil > now
+    val coolingUntil = FallbackPolicy.earliestModelLock(connection)?.takeIf { it > now }
+    val cooling = coolingUntil != null
     val status = when {
         !connection.isActive -> "Paused"
         cooling -> "Cooling"
@@ -870,7 +872,7 @@ private fun ConnectionCard(
                     color = TextSecondary
                 )
             }
-            if (cooling && coolingUntil != null) {
+            if (coolingUntil != null) {
                 Spacer(Modifier.width(6.dp))
                 Text(
                     "⏱ ${((coolingUntil - now) / 1000).coerceAtLeast(0)}s",

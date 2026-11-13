@@ -405,7 +405,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             runCatching {
                 withContext(Dispatchers.IO) {
-                    repo.discoverCustomModels(nodeId, apiKey.ifBlank { null })
+                    repo.discoverCustomModels(
+                        nodeId,
+                        apiKey.ifBlank { null },
+                        merge = false
+                    )
                 }
             }.onSuccess { models ->
                 emit("Found ${models.size} models")

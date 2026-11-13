@@ -399,7 +399,11 @@ class AppRepository(context: android.content.Context) {
     }
 
     /** Fetches `/models` for an existing custom provider and merges the result. */
-    suspend fun discoverCustomModels(nodeId: String, apiKey: String? = null): List<String> =
+    suspend fun discoverCustomModels(
+        nodeId: String,
+        apiKey: String? = null,
+        merge: Boolean = true
+    ): List<String> =
         withContext(Dispatchers.IO) {
             val node = customProviderDao.getById(nodeId)
                 ?: throw IllegalArgumentException("Unknown custom provider")
@@ -407,6 +411,7 @@ class AppRepository(context: android.content.Context) {
                 ?: providerDao.getByProvider(nodeId).firstOrNull()
                     ?.let { Crypto.decrypt(it.apiKey) }
             val discovered = UpstreamClient.listModels(node.baseUrl, node.isAnthropic, key)
+            if (!merge) return@withContext discovered
             val merged = (node.modelIds() + discovered).distinct()
             val updated = node.withModels(merged).copy(updatedAt = Instant.now().toString())
             customProviderDao.upsert(updated)

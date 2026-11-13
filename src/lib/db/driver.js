@@ -3,8 +3,16 @@ import { stripNullBytes } from "./helpers/nullBytes.js";
 import { pullFromBlob, pushToBlob, refreshFromBlobIfUpdated, hasBlobStorage, remoteDbExists } from "./blobSync.js";
 
 // Use global to survive Next.js dev hot-reload (module state resets on reload)
-if (!global._dbAdapter) global._dbAdapter = { instance: null, initPromise: null, logged: false };
+if (!global._dbAdapter) {
+  global._dbAdapter = {
+    instance: null,
+    initPromise: null,
+    logged: false,
+    blobSyncBlocked: false,
+  };
+}
 const state = global._dbAdapter;
+if (state.blobSyncBlocked === undefined) state.blobSyncBlocked = false;
 
 async function tryBunSqlite() {
   // Bun runtime only — built-in, no install needed
@@ -85,10 +93,12 @@ function withNullByteSafeParams(adapter) {
 async function initAdapter() {
   ensureDirs();
   let pulled = false;
+  let pullFailed = false;
   if (hasBlobStorage()) {
     try {
       pulled = await pullFromBlob();
     } catch (e) {
+      pullFailed = true;
       console.warn(`[DB] pullFromBlob failed: ${e?.message}`);
     }
   }
@@ -117,11 +127,22 @@ async function initAdapter() {
   // instance (last-write-wins), which is exactly how connections vanished.
   // Also never seed after a failed pull: a transient download error must not
   // overwrite a remote database that is still there.
-  if (hasBlobStorage() && !pulled && !(await remoteDbExists())) {
-    try {
-      await pushToBlob(adapter);
-    } catch (e) {
-      console.warn(`[DB] initial pushToBlob failed: ${e?.message}`);
+  if (hasBlobStorage()) {
+    const remoteExists = await remoteDbExists();
+    if (!pulled && !remoteExists) {
+      try {
+        await pushToBlob(adapter);
+      } catch (e) {
+        console.warn(`[DB] initial pushToBlob failed: ${e?.message}`);
+      }
+    } else if (!pulled && remoteExists) {
+      // The local DB is empty but the remote still holds the user's data.
+      // Block pushes until a later refresh succeeds, otherwise one write
+      // would replace the remote database with this empty snapshot.
+      state.blobSyncBlocked = true;
+      console.warn(
+        `[DB] Remote DB exists but could not be pulled${pullFailed ? " (download error)" : ""}; blocking pushes until refresh succeeds`
+      );
     }
   }
 
@@ -139,7 +160,7 @@ export async function refreshNow() {
   if (!state.instance || !hasBlobStorage() || refreshing) return false;
   refreshing = true;
   try {
-    return await refreshFromBlobIfUpdated(
+    const refreshed = await refreshFromBlobIfUpdated(
       () => state.instance,
       async () => {
         state.instance = null;
@@ -148,6 +169,8 @@ export async function refreshNow() {
       },
       { force: true }
     );
+    if (refreshed) state.blobSyncBlocked = false;
+    return refreshed;
   } finally {
     refreshing = false;
   }
@@ -156,7 +179,7 @@ export async function refreshNow() {
 export async function getAdapter() {
   if (state.instance) {
     if (hasBlobStorage()) {
-      await refreshFromBlobIfUpdated(
+      const refreshed = await refreshFromBlobIfUpdated(
         () => state.instance,
         async () => {
           state.instance = null;
@@ -164,10 +187,34 @@ export async function getAdapter() {
           await getAdapter();
         }
       );
+      if (refreshed) state.blobSyncBlocked = false;
     }
     return state.instance;
   }
   if (!state.initPromise) state.initPromise = initAdapter().then((a) => { state.instance = a; return a; });
+  return state.initPromise;
+}
+
+export function isBlobSyncBlocked() {
+  return state.blobSyncBlocked === true;
+}
+
+/**
+ * Return the current adapter without checking Blob freshness.
+ *
+ * Write paths call this when flushing: a refresh here would be destructive,
+ * because it closes the adapter and replaces the local file with the remote
+ * snapshot *after* the row was inserted, then uploads that snapshot — losing
+ * the write the caller just made.
+ */
+export async function getAdapterNoRefresh() {
+  if (state.instance) return state.instance;
+  if (!state.initPromise) {
+    state.initPromise = initAdapter().then((a) => {
+      state.instance = a;
+      return a;
+    });
+  }
   return state.initPromise;
 }
 

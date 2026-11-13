@@ -11,7 +11,7 @@ import { getProviderConnections, getSettings } from "@/lib/localDb";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { getUsageForProvider } from "open-sse/services/usage.js";
 import { USAGE_APIKEY_PROVIDERS, AI_PROVIDERS } from "@/shared/constants/providers";
-import { normalizeTelegramConfig } from "./config.js";
+import { normalizeTelegramConfig, isTelegramConfigured } from "./config.js";
 import { notifyQuotaLow } from "./notify.js";
 
 const MAX_CONNECTIONS = 12;
@@ -174,7 +174,7 @@ export async function notifyLowQuotaFromUsage(connection, usage, settings) {
 export async function checkQuotaAndNotify() {
   const settings = await getSettings();
   const cfg = normalizeTelegramConfig(settings);
-  if (!cfg.notifyQuota) return { checked: 0, alerted: 0 };
+  if (!isTelegramConfigured(cfg) || !cfg.notifyQuota) return { checked: 0, alerted: 0, skipped: true };
 
   const results = await collectUsage();
   let alerted = 0;

@@ -84,9 +84,10 @@ function withNullByteSafeParams(adapter) {
 
 async function initAdapter() {
   ensureDirs();
+  let pulled = false;
   if (hasBlobStorage()) {
     try {
-      await pullFromBlob();
+      pulled = await pullFromBlob();
     } catch (e) {
       console.warn(`[DB] pullFromBlob failed: ${e?.message}`);
     }
@@ -111,7 +112,10 @@ async function initAdapter() {
   const { runMigrationOnce } = await import("./migrate.js");
   await runMigrationOnce(adapter);
 
-  if (hasBlobStorage()) {
+  // Seed the remote store only when it does not exist yet. Pushing on every
+  // cold start lets a stale instance clobber newer data written by another
+  // instance (last-write-wins), which is exactly how connections vanished.
+  if (hasBlobStorage() && !pulled) {
     try {
       await pushToBlob(adapter);
     } catch (e) {

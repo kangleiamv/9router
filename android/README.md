@@ -18,6 +18,7 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 | OAuth | Browser sign-in for Antigravity, Gemini CLI and Claude Code with a one-shot loopback callback, PKCE for Claude, automatic token refresh |
 | Routing | Combos, vision combo, per-account fallback, exponential backoff, model locks |
 | Telegram | Bot API long polling inside the foreground service, `/help` `/model` `/combo` `/vision` `/status` `/quota` `/clear` |
+| Cloudflare Tunnel | Optional public `/v1` endpoint via a bundled native `cloudflared` connector: quick `trycloudflare.com` URLs or named Zero Trust tunnels |
 | UI | Compose Material 3, Obsidian dark theme, drawer navigation |
 | Background | Foreground service + boot receiver (auto-start optional) |
 
@@ -30,6 +31,7 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 - **Usage** — animated 7-day/hourly charts, provider and status breakdowns, and a dedicated Overview / Request log switcher with a day-grouped, filterable request feed
 - **Quota Tracker** — live provider limits (Antigravity, Gemini CLI, Claude, DeepSeek, Groq, GLM, OpenCode, Vercel AI Gateway, Ollama Cloud, MiniMax), animated gauges, reset countdowns, local usage fallback, and cooldown/model-lock tracking
 - **Telegram Bot** — bot token, owner chat id, routing, notifications, commands
+- **Cloudflare Tunnel** — quick or named tunnel, public URL with copy/open/retry, connector state and live log tail
 - **Console Log** — live day-grouped request inspector with status filters, collapsible search, expandable request/response payloads and one-tap copy
 - **Settings** — port, auto-start, retention, storage, runtime info
 
@@ -65,10 +67,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.5>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.7>.
 
 ```bash
-adb install -r 9router-android-1.3.5-debug.apk
+adb install -r 9router-android-1.3.7-debug.apk
 ```
 
 Or download the artifact and open it on the device (allow install from unknown
@@ -208,9 +210,41 @@ app removes a stale webhook automatically. The same engine handles bot messages.
 Proactive alerts are sent to the owner chat when every connection for a model is
 cooling down (toggle in the Telegram screen).
 
+## Cloudflare Tunnel
+
+The **Cloudflare Tunnel** screen exposes the gateway to the internet without a
+separate Termux install. The tunnel is optional and off by default.
+
+1. Open **Cloudflare Tunnel** and choose a mode:
+   - **Quick tunnel** needs no account. Tap **Start** and wait for a
+     `https://<random>.trycloudflare.com` URL. The URL changes every time the
+     connector restarts.
+   - **Named tunnel** needs a Zero Trust tunnel token from the Cloudflare
+     dashboard (`Networks → Tunnels`). Paste the token, optionally enter the
+     public hostname you configured there, and start the tunnel. The token is
+     stored encrypted with the Android Keystore.
+2. Copy the public URL and use it as the base URL in a remote OpenAI-compatible
+   client, with the same 9Router API key shown in **Endpoint & Key**.
+3. The screen shows connector state and the last log lines. Use **Retry** after
+   a network change, or **Stop** to close the public listener.
+
+The connector runs inside the proxy foreground service and starts automatically
+when **tunnel_enabled** is set, including after boot if auto-start is enabled.
+
+Only the OpenAI-compatible surface is published: `/v1/models`,
+`/v1/chat/completions` and their short aliases. Cloudflared connects to a
+separate loopback listener; the management API, settings, keys, logs and
+Telegram endpoints stay reachable only on the device.
+
+The bundled `cloudflared` is the Termux Android/arm64 build (2026.11.0),
+executed directly from `nativeLibraryDir`. It is packaged for `arm64-v8a` only:
+on other ABIs the rest of the app works, but the tunnel reports that the
+connector is unavailable.
+
 ## Notes and limits
 
-- The gateway binds to loopback only. Use `adb forward` for desktop clients.
+- The management gateway binds to loopback only. Use `adb forward` for desktop
+  clients, or the Cloudflare Tunnel screen for remote access.
 - Custom OpenAI-compatible nodes use Chat Completions. The Responses API is not
   supported yet; choose Chat Completions when creating a node.
 - Streaming is relayed for OpenAI/Ollama upstreams and translated to OpenAI SSE

@@ -23,7 +23,7 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 
 ## Screens
 
-- **Dashboard** — gateway state, base URL, active key, daily stats, recent requests
+- **Dashboard** — gateway state, base URL, active key, daily stats, and a flat recent-activity feed with provider logos, status badges and error summaries
 - **Providers** — searchable directory with logos, connections, priority order, test, live model fetch, edit, pause, delete, plus OpenAI/Anthropic compatible custom endpoints
 - **Combo & Vision** — ordered fallback chains and the vision adapter
 - **Endpoint & Key** — client credentials plus a copy-paste `curl` test
@@ -65,10 +65,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.2>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.3>.
 
 ```bash
-adb install -r 9router-android-1.3.2-debug.apk
+adb install -r 9router-android-1.3.3-debug.apk
 ```
 
 Or download the artifact and open it on the device (allow install from unknown

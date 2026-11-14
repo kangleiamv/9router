@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -46,6 +45,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import ai.ninerouter.core.ProxyRuntime
+import ai.ninerouter.data.model.RequestDetail
 import ai.ninerouter.ui.MainViewModel
 import ai.ninerouter.ui.components.AppCard
 import ai.ninerouter.ui.components.EmptyState
@@ -53,7 +53,7 @@ import ai.ninerouter.ui.components.GhostButton
 import ai.ninerouter.ui.components.HairLine
 import ai.ninerouter.ui.components.MetaRow
 import ai.ninerouter.ui.components.PrimaryButton
-import ai.ninerouter.ui.components.RequestRow
+import ai.ninerouter.ui.components.RequestLogRow
 import ai.ninerouter.ui.components.SectionHeader
 import ai.ninerouter.ui.components.StatTile
 import ai.ninerouter.ui.components.StatusPill
@@ -203,35 +203,10 @@ fun DashboardScreen(
             }
         }
         item {
-            Row(
-                Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    "Recent activity",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = TextPrimary,
-                    modifier = Modifier.weight(1f)
-                )
-                TextButton(onClick = { onNavigate("logs") }) {
-                    Text("View all", color = Brand, style = MaterialTheme.typography.labelLarge)
-                }
-            }
-        }
-        if (requests.isEmpty()) {
-            item {
-                EmptyState(
-                    icon = Icons.Filled.Dns,
-                    title = "No requests yet",
-                    body = "Send an OpenAI-compatible request to the local endpoint and it will show up here."
-                )
-            }
-        } else {
-            items(requests.take(6), key = { it.id }) { detail ->
-                AppCard(padding = 12.dp) {
-                    RequestRow(detail)
-                }
-            }
+            RecentActivitySection(
+                requests = requests,
+                onOpenLog = { onNavigate("logs") }
+            )
         }
         item {
             Spacer(Modifier.height(4.dp))
@@ -242,6 +217,58 @@ fun DashboardScreen(
                 modifier = Modifier.fillMaxWidth(),
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center
             )
+        }
+    }
+}
+
+@Composable
+private fun RecentActivitySection(
+    requests: List<RequestDetail>,
+    onOpenLog: () -> Unit
+) {
+    val recent = remember(requests) { requests.take(6) }
+    val errors = recent.count { (it.status ?: 0) >= 400 }
+    val ok = recent.count { (it.status ?: 0) in 200..299 }
+    Column(Modifier.fillMaxWidth()) {
+        SectionHeader(
+            title = "Recent activity",
+            subtitle = when {
+                recent.isEmpty() -> "No requests captured yet"
+                errors == 1 -> "Latest ${recent.size} requests · 1 error"
+                errors > 1 -> "Latest ${recent.size} requests · $errors errors"
+                ok == recent.size -> "Latest ${recent.size} requests · all OK"
+                else -> "Latest ${recent.size} requests"
+            },
+            trailing = {
+                if (recent.isNotEmpty()) {
+                    TextButton(onClick = onOpenLog) {
+                        Text(
+                            "View all",
+                            color = Brand,
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                    }
+                }
+            }
+        )
+        if (recent.isEmpty()) {
+            EmptyState(
+                icon = Icons.Filled.Dns,
+                title = "No requests yet",
+                body = "Send an OpenAI-compatible request to the local endpoint and it will show up here."
+            )
+        } else {
+            Spacer(Modifier.height(6.dp))
+            HairLine(Modifier.padding(horizontal = 8.dp))
+            recent.forEachIndexed { index, detail ->
+                RequestLogRow(
+                    detail = detail,
+                    onClick = onOpenLog
+                )
+                if (index != recent.lastIndex) {
+                    HairLine(Modifier.padding(start = 55.dp, end = 8.dp))
+                }
+            }
         }
     }
 }

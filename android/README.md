@@ -27,8 +27,8 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 - **Providers** — searchable directory with logos, connections, priority order, test, live model fetch, edit, pause, delete, plus OpenAI/Anthropic compatible custom endpoints
 - **Combo & Vision** — ordered fallback chains and the vision adapter
 - **Endpoint & Key** — client credentials plus a copy-paste `curl` test
-- **Usage** — per-provider analytics and a filterable request log
-- **Quota Tracker** — live cooldowns and model locks with countdowns
+- **Usage** — animated 7-day/hourly charts, provider and status breakdowns, searchable unified request log
+- **Quota Tracker** — live provider limits (Antigravity, Gemini CLI, Claude, DeepSeek, Groq, GLM, OpenCode, Vercel AI Gateway, Ollama Cloud, MiniMax), animated gauges, reset countdowns, local usage fallback, and cooldown/model-lock tracking
 - **Telegram Bot** — bot token, owner chat id, routing, notifications, commands
 - **Console Log** — searchable request history with request/response payloads
 - **Settings** — port, auto-start, retention, storage, runtime info
@@ -65,10 +65,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.0>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.1>.
 
 ```bash
-adb install -r 9router-android-1.3.0-debug.apk
+adb install -r 9router-android-1.3.1-debug.apk
 ```
 
 Or download the artifact and open it on the device (allow install from unknown
@@ -119,6 +119,32 @@ model that is not enabled for the account. The app handles it as follows:
 
 If a client request still returns the 404, select `gemini-3.8-flash-medium` as
 the model in that client (the model the web dashboard uses by default).
+
+## Quota tracking
+
+The **Quota Tracker** fetches each connection's own usage endpoint and renders
+the returned windows as animated bars with reset countdowns:
+
+- **Antigravity** — Cloud Code weekly/5h family summary, with a paid-tier
+  per-model fallback when the summary is unavailable.
+- **Gemini CLI** — per-model `retrieveUserQuota` buckets, tightest first.
+- **Claude Code** — 5h, 7d and model-scoped weekly windows from the OAuth usage
+  endpoint.
+- **DeepSeek** — account balance.
+- **Groq** — request and token rate-limit headers.
+- **GLM / GLM-CN** — coding-plan token and credit limits.
+- **OpenCode Go / Zen** — rolling, weekly and monthly windows.
+- **Vercel AI Gateway** — remaining and used USD credit.
+- **Ollama Cloud** — session, weekly, monthly and allowance windows.
+- **MiniMax / MiniMax-CN** — 5h and weekly coding-plan limits.
+
+Every connection keeps a card even when its provider has no public quota API.
+That card shows today's request/token volume, a seven-day sparkline, rotation
+status and any model locks, so providers never disappear from the tracker. The
+screen refreshes automatically when opened and every two minutes afterwards;
+the refresh-all button forces every connection, while each card has its own
+refresh action. Snapshots are cached for 90 seconds to avoid upstream rate
+limits.
 
 ## Provider directory and live models
 

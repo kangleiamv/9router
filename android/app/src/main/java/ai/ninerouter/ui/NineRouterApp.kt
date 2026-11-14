@@ -95,7 +95,7 @@ private val entries = listOf(
     DrawerEntry("combos", "Combo & Vision", Icons.Filled.Layers, "Fallback chains"),
     DrawerEntry("keys", "Endpoint & Key", Icons.Filled.VpnKey, "Client credentials"),
     DrawerEntry("usage", "Usage", Icons.Filled.BarChart, "Request analytics"),
-    DrawerEntry("quota", "Quota Tracker", Icons.Filled.DataUsage, "Cooldowns & locks"),
+    DrawerEntry("quota", "Quota Tracker", Icons.Filled.DataUsage, "Live limits & cooldowns"),
     DrawerEntry("telegram", "Telegram Bot", Icons.Filled.Send, "Chat bridge"),
     DrawerEntry("logs", "Console Log", Icons.Filled.Article, "Request history"),
     DrawerEntry("settings", "Settings", Icons.Filled.Settings, "Gateway & storage")

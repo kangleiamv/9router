@@ -11,6 +11,8 @@ import ai.ninerouter.data.model.CustomProvider
 import ai.ninerouter.data.model.ProviderConnection
 import ai.ninerouter.data.model.RequestDetail
 import ai.ninerouter.engine.ProviderCatalog
+import ai.ninerouter.engine.ProviderQuota
+import ai.ninerouter.engine.ProviderQuotaClient
 import ai.ninerouter.engine.ProviderSpec
 import ai.ninerouter.engine.oauth.OAuthClient
 import ai.ninerouter.engine.oauth.OAuthException
@@ -23,6 +25,9 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -33,12 +38,17 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonPrimitive
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
+
+private const val QUOTA_TTL_MS = 90_000L
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val repo = AppContainer.repository
@@ -83,6 +93,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _events = MutableSharedFlow<UiEvent>(extraBufferCapacity = 8)
     val events = _events.asSharedFlow()
+
+    /** Live provider quota snapshots keyed by connection id. */
+    private val _quotas = MutableStateFlow<Map<String, ProviderQuota>>(emptyMap())
+    val quotas: StateFlow<Map<String, ProviderQuota>> = _quotas.asStateFlow()
+
+    /** Connection ids with an in-flight quota request. */
+    private val _quotaBusy = MutableStateFlow<Set<String>>(emptySet())
+    val quotaBusy: StateFlow<Set<String>> = _quotaBusy.asStateFlow()
+
+    private val _quotaRefreshAllAt = MutableStateFlow(0L)
+    val quotaRefreshAllAt: StateFlow<Long> = _quotaRefreshAllAt.asStateFlow()
 
     val stats: StateFlow<DashboardStats> = combine(repo.requests, repo.connections) { list, conns ->
         val start = LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
@@ -485,6 +506,58 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runCatching { repo.setKeyActive(key, !key.isActive) }
                 .onSuccess { emit(if (key.isActive) "Key disabled" else "Key enabled") }
                 .onFailure { emit(it.message ?: "Update failed", true) }
+        }
+    }
+
+    /**
+     * Fetches live quota windows for one connection. Cached snapshots younger
+     * than [QUOTA_TTL_MS] are reused unless [force] is set.
+     */
+    fun refreshQuota(connection: ProviderConnection, force: Boolean = true) {
+        refreshQuotas(listOf(connection), force)
+    }
+
+    /**
+     * Fetches live quota windows for every supplied connection with bounded
+     * parallelism. Every card is marked busy immediately so the UI can show a
+     * per-provider spinner even when several requests are queued.
+     */
+    fun refreshQuotas(targets: List<ProviderConnection>, force: Boolean = false) {
+        if (targets.isEmpty()) return
+        val now = System.currentTimeMillis()
+        val busy = _quotaBusy.value
+        val pending = targets.distinctBy { it.id }.filter { connection ->
+            if (connection.id in busy) return@filter false
+            val snapshot = _quotas.value[connection.id]
+            force || snapshot == null || now - snapshot.fetchedAt > QUOTA_TTL_MS
+        }
+        if (pending.isEmpty()) return
+        _quotaBusy.update { busy -> busy + pending.map { it.id } }
+        viewModelScope.launch {
+            val gate = Semaphore(3)
+            coroutineScope {
+                pending.map { connection ->
+                    async(Dispatchers.IO) {
+                        gate.withPermit {
+                            try {
+                                val result = runCatching { ProviderQuotaClient.fetch(connection, force) }
+                                    .getOrElse { error ->
+                                        ProviderQuota(
+                                            connectionId = connection.id,
+                                            provider = connection.provider,
+                                            message = error.message ?: "Quota fetch failed"
+                                        )
+                                    }
+                                _quotas.update { it + (connection.id to result) }
+                            } finally {
+                                _quotaBusy.update { it - connection.id }
+                            }
+                        }
+                    }
+                }.awaitAll()
+            }
+            _quotaRefreshAllAt.value = System.currentTimeMillis()
+            if (pending.size > 1) emit("Refreshed quota for ${pending.size} connections")
         }
     }
 

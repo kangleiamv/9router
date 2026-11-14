@@ -165,7 +165,11 @@ fun NineRouterRoot(viewModel: MainViewModel) {
                             selected = route == item.route,
                             onClick = {
                                 scope.launch { drawerState.close() }
-                                if (route != item.route) {
+                                if (item.route == "dashboard") {
+                                    // Always reveal the existing dashboard entry. This avoids
+                                    // restored navigation state leaving another screen visible.
+                                    navController.popBackStack("dashboard", inclusive = false)
+                                } else if (route != item.route) {
                                     navController.navigate(item.route) {
                                         launchSingleTop = true
                                         popUpTo("dashboard") { saveState = true }

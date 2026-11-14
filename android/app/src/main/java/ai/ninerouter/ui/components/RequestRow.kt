@@ -43,7 +43,7 @@ import java.time.format.DateTimeFormatter
 @Composable
 fun RequestLogRow(
     detail: RequestDetail,
-    onClick: () -> Unit,
+    onClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val color = statusColor(detail.status)
@@ -60,12 +60,13 @@ fun RequestLogRow(
         detail.connectionName?.takeIf { it.isNotBlank() }?.let { append(" · ").append(it) }
         if (tokens > 0) append(" · ").append(formatCount(tokens)).append(" tok")
     }
+    val clickModifier = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
     Row(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
             .background(if (isError) Rose.copy(alpha = 0.05f) else Color.Transparent)
-            .clickable(onClick = onClick)
+            .then(clickModifier)
             .padding(horizontal = 8.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {

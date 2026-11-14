@@ -261,10 +261,7 @@ private fun RecentActivitySection(
             Spacer(Modifier.height(6.dp))
             HairLine(Modifier.padding(horizontal = 8.dp))
             recent.forEachIndexed { index, detail ->
-                RequestLogRow(
-                    detail = detail,
-                    onClick = onOpenLog
-                )
+                RequestLogRow(detail = detail)
                 if (index != recent.lastIndex) {
                     HairLine(Modifier.padding(start = 55.dp, end = 8.dp))
                 }

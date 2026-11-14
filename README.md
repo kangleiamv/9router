@@ -106,8 +106,8 @@ quota tracking and the Telegram bot. Every screen is Compose — there is no
 WebView and no demo build.
 
 Download the debug APK from
-[Releases](https://github.com/kangleiamv/9router/releases/tag/android-v1.3.3),
-then `adb install -r 9router-android-1.3.3-debug.apk` (or open the file on the
+[Releases](https://github.com/kangleiamv/9router/releases/tag/android-v1.3.4),
+then `adb install -r 9router-android-1.3.4-debug.apk` (or open the file on the
 device). Build instructions are in [`android/README.md`](./android/README.md).
 The Providers screen mirrors the web registry with bundled logos, and the
 **Models** button discovers each provider's live catalog and caches it for

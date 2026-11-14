@@ -65,10 +65,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.3>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.4>.
 
 ```bash
-adb install -r 9router-android-1.3.3-debug.apk
+adb install -r 9router-android-1.3.4-debug.apk
 ```
 
 Or download the artifact and open it on the device (allow install from unknown

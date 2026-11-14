@@ -213,6 +213,20 @@ export const MODEL_CAPABILITIES = {
   // DEFAULT_CAPABILITIES (reasoning: false) and applyThinking() strips the client's
   // reasoning_effort before it reaches the upstream — see #2690.
   // Modalities and limits below are taken verbatim from models.dev.
+  // Live free catalog (2026-11-14). These ids are served by OpenCode's own
+  // inference lane, which accepts the plain OpenAI reasoning_effort enum; the
+  // family patterns below (zai/minimax/deepseek/mimo) describe the vendors' own
+  // APIs and emit `thinking` objects this lane rejects with 400
+  // unknown field "thinking". Reasoning is on for every entry so the translation
+  // layer does not strip the client's effort.
+  "minimax-m3.1-flash-free": { vision: true, reasoning: true, thinkingFormat: "openai", contextWindow: 1000000, maxOutput: 131072 },
+  "longcat-2.5-free":        { reasoning: true, thinkingFormat: "openai", contextWindow: 1000000, maxOutput: 131072 },
+  "iceman-free":             { reasoning: true, thinkingFormat: "openai", contextWindow: 262144, maxOutput: 65536 },
+  "inkling-2-small-free":    { reasoning: true, thinkingFormat: "openai", contextWindow: 262144, maxOutput: 65536 },
+  "beam-free":               { reasoning: true, thinkingFormat: "openai", contextWindow: 262144, maxOutput: 65536 },
+  "flint-40b-free":          { reasoning: true, thinkingFormat: "openai", contextWindow: 131072, maxOutput: 32768 },
+  "nemotron-3.5-lightning-free": { reasoning: true, thinkingFormat: "openai", contextWindow: 131072, maxOutput: 32768 },
+  "nemotron-3.5-super-vl-free":  { vision: true, reasoning: true, thinkingFormat: "openai", contextWindow: 131072, maxOutput: 32768 },
   "space-bunny-free":  { vision: true, videoInput: true, reasoning: true, thinkingFormat: "openai", contextWindow: 1048576, maxOutput: 524288 },
   "space-bunny":       { vision: true, videoInput: true, reasoning: true, thinkingFormat: "openai", contextWindow: 1048576, maxOutput: 524288 },
   "big-pickle":        { reasoning: true, thinkingFormat: "openai", contextWindow: 200000, maxOutput: 32000 },

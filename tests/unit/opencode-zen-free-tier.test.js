@@ -6,6 +6,7 @@ import { isOpencodeFreeTierModel } from "../../open-sse/providers/models/helpers
 // Upstream 403s free-tier models on the keyed lane when the request carries a
 // real oc_sk_* key (FreeTierError: "can only be used from within OpenCode").
 // The executor must switch those to the attested `Bearer public` identity.
+// big-pickle is a stealth free model without the "-free" suffix.
 
 function preparedCredentials(executor, overrides = {}) {
   const body = { messages: [{ role: "user", content: "hi" }] };
@@ -26,31 +27,31 @@ function preparedCredentials(executor, overrides = {}) {
 function headersFor(model, overrides) {
   const executor = new OpenCodeZenExecutor();
   const credentials = preparedCredentials(executor, overrides);
-  return executor.buildHeaders(credentials, true, "https://opencode.ai/zen/v1/chat/completions", model);
+  return executor.buildHeaders(credentials, true, "https://opencode.ai/inference/openai/v1/chat/completions", model);
 }
 
 describe("isOpencodeFreeTierModel", () => {
   it("detects -free suffixed ids", () => {
     for (const m of [
       "mimo-v2.6-flash-free",
-      "muse-spark-1.3-contributor-free",
-      "big-pickle-free",
-      "deepseek-v4-flash-free",
-      "jev-1.13-free",
+      "deepseek-v4.1-flash-free",
+      "glm-5.3-flash-free",
+      "minimax-m3.1-flash-free",
+      "nemotron-3.5-lightning-free",
     ]) {
       expect(isOpencodeFreeTierModel(m)).toBe(true);
     }
   });
 
   it("ignores paid models", () => {
-    for (const m of ["big-pickle", "muse-spark-1.3", "gpt-5.5", "claude-opus-5", "kimi-k3"]) {
+    for (const m of ["big-pickle", "muse-spark-1.3", "gpt-6.1-sol", "claude-opus-5-5", "kimi-k3"]) {
       expect(isOpencodeFreeTierModel(m)).toBe(false);
     }
   });
 
   it("strips thinking suffixes and provider prefixes before matching", () => {
     expect(isOpencodeFreeTierModel("mimo-v2.6-flash-free(xhigh)")).toBe(true);
-    expect(isOpencodeFreeTierModel("muse-spark-1.3-contributor-free(1m)")).toBe(true);
+    expect(isOpencodeFreeTierModel("glm-5.3-flash-free(max)")).toBe(true);
     expect(isOpencodeFreeTierModel("ocfree/mimo-v2.6-flash-free")).toBe(true);
     expect(isOpencodeFreeTierModel("big-pickle(max)")).toBe(false);
     expect(isOpencodeFreeTierModel("")).toBe(false);
@@ -59,28 +60,50 @@ describe("isOpencodeFreeTierModel", () => {
 });
 
 describe("OpenCodeZenExecutor free-tier auth", () => {
-  it("sends Bearer public + session + request ids for free-tier models", () => {
+  it("sends Bearer public + the v2 session headers for free-tier models", () => {
     const headers = headersFor("mimo-v2.6-flash-free");
     expect(headers["Authorization"]).toBe("Bearer public");
     expect(headers["x-opencode-session"]).toMatch(OPENCODE_SESSION_RE);
-    expect(headers["x-opencode-request"]).toMatch(/^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
-    expect(headers["x-opencode-client"]).toBe("desktop");
-    expect(headers["User-Agent"]).toMatch(/opencode\/\d+\.\d+/i);
+    expect(headers["x-opencode-session-id"]).toBe(headers["x-opencode-session"]);
+    expect(headers["x-session-affinity"]).toBe(headers["x-opencode-session"]);
+    expect(headers["x-session-id"]).toBe(headers["x-opencode-session"]);
+    expect("x-opencode-request" in headers).toBe(false);
+    expect(headers["x-opencode-client"]).toBe("cli");
+    expect(headers["User-Agent"]).toBe("opencode/latest/2.3.0/cli");
   });
 
-  it("does the same for responses-endpoint free models", () => {
-    const headers = headersFor(
-      "muse-spark-1.3-contributor-free",
-      {},
-    );
+  it("treats stealth big-pickle as a free model", () => {
+    const headers = headersFor("big-pickle");
     expect(headers["Authorization"]).toBe("Bearer public");
-    expect(headers["x-opencode-request"]).toMatch(/^msg_/);
+    expect(headers["x-opencode-session"]).toMatch(OPENCODE_SESSION_RE);
   });
 
   it("keeps the connection key for paid models", () => {
-    const headers = headersFor("big-pickle");
+    const headers = headersFor("deepseek-v4.1-flash");
     expect(headers["Authorization"]).toBe("Bearer oc_sk_test_key");
-    expect(headers["x-opencode-request"]).toBeUndefined();
+    expect("x-opencode-request" in headers).toBe(false);
     expect(headers["x-opencode-session"]).toMatch(OPENCODE_SESSION_RE);
+    expect(headers["x-opencode-session-id"]).toBe(headers["x-opencode-session"]);
+  });
+
+  it("does not inject free-tier fingerprint tools into paid requests", () => {
+    const executor = new OpenCodeZenExecutor();
+    const paid = executor.transformRequest(
+      "deepseek-v4.1-flash",
+      { messages: [{ role: "user", content: "hi" }] },
+      true,
+      { apiKey: "oc_sk_test_key" },
+    );
+    expect(paid.tools).toBeUndefined();
+    expect(paid.stream).toBeUndefined();
+
+    const free = executor.transformRequest(
+      "deepseek-v4.1-flash-free",
+      { messages: [{ role: "user", content: "hi" }] },
+      true,
+      { apiKey: "oc_sk_test_key" },
+    );
+    expect(free.tools.map((t) => t.function?.name)).toEqual(["bash", "glob", "grep", "read"]);
+    expect(free.stream).toBe(true);
   });
 });

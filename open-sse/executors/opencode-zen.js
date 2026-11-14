@@ -13,9 +13,12 @@ const SESSION_HEADER = "x-opencode-session";
 const SESSION_FIELD = "_opencodeZenSession";
 const MAX_SESSION_LENGTH = 256;
 
-const RESPONSES_BASE_URL = "https://opencode.ai/zen/v1/responses";
+const RESPONSES_BASE_URL = "https://opencode.ai/inference/openai/v1/responses";
 const MAX_TOOL_NAME_LEN = 128;
-const OPENCODE_UA = "opencode/1.18.31";
+// OpenCode v2 UA shape: opencode/<channel>/<version>/<client>. v1 clients are
+// rejected by the free-tier gate with 403 FreeTierError since 2026-10-14.
+const OPENCODE_UA = "opencode/latest/2.3.0/cli";
+const OPENCODE_CLIENT = "cli";
 export const OPENCODE_SESSION_RE = /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/;
 const BASE62_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 // Free-tier fingerprint (mirrors opencode executor, PR #4132): upstream 403s
@@ -23,7 +26,7 @@ const BASE62_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuv
 const OPENCODE_FINGERPRINT_TOOLS = ["bash", "glob", "grep", "read"];
 
 function hasValidOpencodeVersion(ua) {
-  const m = String(ua || "").match(/opencode\/(\d+)\.(\d+)(?:\.(\d+))?/i);
+  const m = String(ua || "").match(/(\d+)\.(\d+)(?:\.(\d+))?/);
   if (!m) return false;
   const major = parseInt(m[1], 10);
   const minor = parseInt(m[2], 10);
@@ -53,17 +56,6 @@ function descendingTimeHex(time, counterValue) {
 
 export function generateSessionId(timestamp = Date.now()) {
   return `ses_${descendingTimeHex(timestamp, 1)}${unstableRandom()}`;
-}
-
-export function generateRequestId(timestamp = Date.now()) {
-  const current = BigInt(timestamp) * 0x1000n + 1n;
-  const value = current;
-  const time = Array.from({ length: 6 }, (_, index) =>
-    Number((value >> BigInt(40 - 8 * index)) & 0xffn)
-      .toString(16)
-      .padStart(2, "0")
-  ).join("");
-  return `msg_${time}${unstableRandom()}`;
 }
 
 export function translateSessionId(sessionId, clientTool = "") {
@@ -170,6 +162,13 @@ function isResponsesModel(model) {
   return isMuseSparkModel(baseModelId(model));
 }
 
+// big-pickle is a stealth free model without the "-free" suffix; every other
+// free id carries it. The attested free-tier identity only applies to these.
+function isFreeLaneModel(model) {
+  const base = baseModelId(model);
+  return isOpencodeFreeTierModel(base) || base === "big-pickle";
+}
+
 // Flatten Chat Completions tool declarations into the Responses flat shape and
 // drop hosted/nameless tools the /responses endpoint rejects.
 function normalizeResponsesTools(body) {
@@ -238,6 +237,35 @@ export class OpenCodeZenExecutor extends DefaultExecutor {
     super("opencode-zen");
   }
 
+  /** Free-tier rejections deserve an actionable message, not raw JSON. */
+  parseError(response, bodyText) {
+    const status = response?.status;
+    const text = String(bodyText || "");
+    if (status === 403 && /freetiererror|free tier/i.test(text)) {
+      return {
+        status: 403,
+        message:
+          "OpenCode refused the free-tier identity for this request. Free models are only " +
+          "available inside OpenCode; use a paid model or an OpenCode Go subscription.",
+      };
+    }
+    if (status === 429 && /freeusagelimiterror|free usage limit/i.test(text)) {
+      const retryAfter = Number(response.headers?.get?.("retry-after"));
+      const minutes = Number.isFinite(retryAfter) && retryAfter > 0
+        ? Math.max(1, Math.ceil(retryAfter / 60))
+        : null;
+      return {
+        status: 429,
+        message:
+          "OpenCode Free quota is exhausted for this egress IP (FreeUsageLimitError)." +
+          (minutes ? ` Resets in ~${minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h${minutes % 60 ? ` ${minutes % 60}m` : ""}`}. ` : " ") +
+          "Free models are only available inside OpenCode; use a paid model or a proxy pool with a fresh IP.",
+        resetsAtMs: minutes ? Date.now() + retryAfter * 1000 : undefined,
+      };
+    }
+    return null;
+  }
+
   buildUrl(model, stream, urlIndex = 0, credentials = null) {
     // Muse Spark lives on /responses even when a stale runtimeTransport leaks in.
     if (isResponsesModel(model)) return RESPONSES_BASE_URL;
@@ -271,34 +299,33 @@ export class OpenCodeZenExecutor extends DefaultExecutor {
     const lower = {};
     for (const [k, v] of Object.entries(raw)) lower[k.toLowerCase()] = v;
     const downstreamUa = lower["user-agent"] || "";
-    // Free-tier gate: spoof the official client UA.
+    // Mirror the v2 CLI identity. Upstream expects a v2 UA shape; a v1 caller
+    // or a generic HTTP client is replaced with the current release.
     headers["User-Agent"] = hasValidOpencodeVersion(downstreamUa) ? downstreamUa : OPENCODE_UA;
-    headers["x-opencode-client"] = lower["x-opencode-client"] || "desktop";
+    headers["x-opencode-client"] = lower["x-opencode-client"] || OPENCODE_CLIENT;
     headers["x-opencode-project"] = lower["x-opencode-project"] || "global";
     const prepared = credentials?.[SESSION_FIELD];
-    if (prepared) {
-      headers[SESSION_HEADER] = prepared;
-    } else {
-      const fallback = this.prepareRequestCredentials({ credentials });
-      headers[SESSION_HEADER] = fallback[SESSION_FIELD];
-    }
-    if (isOpencodeFreeTierModel(model)) {
+    const session = prepared || this.prepareRequestCredentials({ credentials })[SESSION_FIELD];
+    headers[SESSION_HEADER] = session;
+    headers["x-opencode-session-id"] = session;
+    headers["x-session-affinity"] = session;
+    headers["x-session-id"] = session;
+    if (isFreeLaneModel(model)) {
       // Free-tier models are gated behind the attested free-tier identity even
       // on the keyed lane: a real oc_sk_* key answers 403 FreeTierError, while
-      // `Bearer public` + session/request ids succeed. Paid models keep the
-      // connection key untouched.
+      // `Bearer public` + session ids succeed. Paid models keep the key.
       headers["Authorization"] = "Bearer public";
-      headers["x-opencode-request"] = generateRequestId();
     }
     return headers;
   }
 
   transformRequest(model, body, stream, credentials) {
     const out = super.transformRequest(model, body);
+    const freeLane = isFreeLaneModel(model || body?.model);
     // Free-tier gate: upstream 403s stream:false even when everything else is valid.
-    if (out && typeof out === "object") out.stream = true;
+    if (freeLane && out && typeof out === "object") out.stream = true;
     if (!isResponsesModel(model || body?.model)) {
-      ensureChatFingerprintTools(out);
+      if (freeLane) ensureChatFingerprintTools(out);
       return out;
     }
     const normalized = normalizeResponsesInput(out.input);
@@ -322,7 +349,7 @@ export class OpenCodeZenExecutor extends DefaultExecutor {
     delete out.reasoning_effort;
     out.stream = true;
     out.store = false;
-    ensureResponsesFingerprintTools(out);
+    if (freeLane) ensureResponsesFingerprintTools(out);
     normalizeResponsesTools(out);
     sanitizeResponsesItems(out);
     return out;

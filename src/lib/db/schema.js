@@ -3,7 +3,7 @@
 // pre-change safety backup in migrate.js: when the stored version is lower,
 // one lightweight DB backup is taken before applying schema changes. Forgetting
 // to bump only skips that backup — it does NOT break the additive auto-sync.
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export const PRAGMA_SQL = `
 PRAGMA journal_mode = WAL;
@@ -138,6 +138,24 @@ export const TABLES = {
       dateKey: "TEXT PRIMARY KEY",
       data: "TEXT NOT NULL",
     },
+  },
+  // Hourly request-outcome buckets powering /api/providers/uptime. One row per
+  // provider/hour keeps the table small: requests/failures are counters, not
+  // per-request samples. Pruned after 45 days by uptimeRepo.
+  providerUptime: {
+    columns: {
+      provider: "TEXT NOT NULL",
+      bucket: "TEXT NOT NULL",
+      requests: "INTEGER DEFAULT 0",
+      failures: "INTEGER DEFAULT 0",
+      latencyMs: "INTEGER DEFAULT 0",
+      lastStatus: "INTEGER",
+      lastAt: "TEXT",
+    },
+    primaryKey: "PRIMARY KEY (provider, bucket)",
+    indexes: [
+      "CREATE INDEX IF NOT EXISTS idx_pu_bucket ON providerUptime(bucket DESC)",
+    ],
   },
   requestDetails: {
     columns: {

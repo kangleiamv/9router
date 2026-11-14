@@ -463,13 +463,14 @@ export async function POST(request) {
           // free keyed-lane model so validation never bills a paid one. Only
           // 401/403 mean the credential was rejected; other statuses (e.g. 400)
           // still confirm upstream accepted the key.
-          const res = await fetch("https://opencode.ai/zen/v1/chat/completions", {
+          const res = await fetch("https://opencode.ai/inference/openai/v1/chat/completions", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
               "Authorization": `Bearer ${apiKey}`,
-              "x-opencode-client": "desktop",
-              "User-Agent": "opencode/1.18.31",
+              "x-opencode-client": "cli",
+              "x-opencode-project": "global",
+              "User-Agent": "opencode/latest/2.3.0/cli",
             },
             body: JSON.stringify({
               model: PROVIDERS["opencode-zen"]?.validationModel || getDefaultModel("ocz"),

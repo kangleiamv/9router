@@ -194,17 +194,14 @@ object UpstreamClient {
     ): PreparedCall {
         val creds = resolveCredentials(connection).toMutableMap()
         val upstreamModel = ProviderCatalog.upstreamModel(spec.id, modelId)
+        // Both the free and keyed lanes now use the v2 OpenAI-compatible gateway;
+        // free ids keep the same base URL and switch identity in authHeaders().
         val baseUrl = baseUrlOverride?.trimEnd('/')?.takeIf { it.isNotBlank() }
-            ?: when {
-                // Free OpenCode models are served by the inference lane, not Zen.
-                spec.id == "opencode-zen" && upstreamModel.endsWith("-free") ->
-                    "https://opencode.ai/inference/v1"
-                else -> spec.baseUrl
-            }
+            ?: spec.baseUrl
             ?: throw UpstreamException("Provider ${spec.id} has no base URL configured")
         fun buildRequest(): Request = when (spec.format) {
             WireFormat.OPENAI, WireFormat.OLLAMA -> openAiRequest(
-                spec, baseUrl, creds, upstreamModel, ctx
+                spec, baseUrl, creds, upstreamModel, ctx, connection.id
             )
             WireFormat.ANTHROPIC -> anthropicRequest(spec, baseUrl, creds, upstreamModel, ctx)
             WireFormat.GEMINI -> geminiRequest(spec, baseUrl, creds, upstreamModel, ctx)
@@ -263,7 +260,12 @@ object UpstreamClient {
     fun isUnknownEntityMessage(text: String): Boolean =
         text.contains("Requested entity was not found", ignoreCase = true)
 
-    private fun authHeaders(spec: ProviderSpec, creds: Map<String, String>): MutableMap<String, String> {
+    private fun authHeaders(
+        spec: ProviderSpec,
+        creds: Map<String, String>,
+        model: String = "",
+        connectionId: String = ""
+    ): MutableMap<String, String> {
         val headers = mutableMapOf("Content-Type" to "application/json", "Accept" to "application/json")
         val key = creds["apiKey"].orEmpty()
         when (spec.id) {
@@ -272,10 +274,21 @@ object UpstreamClient {
                 headers["HTTP-Referer"] = "https://github.com/ninerouter/android"
                 headers["X-Title"] = "9Router Android"
             }
-            "opencode-zen" -> {
-                headers["Authorization"] = "Bearer ${key.ifBlank { "public" }}"
-                headers["User-Agent"] = "opencode/latest/2.0.26/cli"
-                headers["x-opencode-client"] = "cli"
+            "opencode", "opencode-zen" -> {
+                // Free ids use the attested public identity even when a Console
+                // key is present; paid Zen ids keep the connection key.
+                val free = spec.id == "opencode" || OpenCodeFingerprint.isFreeLaneModel(model)
+                headers["Authorization"] = "Bearer ${if (free) "public" else key.ifBlank { "public" }}"
+                headers["User-Agent"] = OpenCodeFingerprint.USER_AGENT
+                headers["x-opencode-client"] = OpenCodeFingerprint.CLIENT
+                headers["x-opencode-project"] = OpenCodeFingerprint.PROJECT
+                val session = OpenCodeFingerprint.sessionId(
+                    "${connectionId.ifBlank { creds["sessionId"].orEmpty() }}:$model"
+                )
+                headers["x-opencode-session"] = session
+                headers["x-opencode-session-id"] = session
+                headers["x-session-affinity"] = session
+                headers["x-session-id"] = session
             }
             "anthropic" -> {
                 headers["x-api-key"] = key
@@ -321,15 +334,19 @@ object UpstreamClient {
         baseUrl: String,
         creds: Map<String, String>,
         upstreamModel: String,
-        ctx: ChatContext
+        ctx: ChatContext,
+        connectionId: String
     ): Request {
-        val payload = buildJsonObject {
+        var payload = buildJsonObject {
             ctx.raw.forEach { (k, v) -> if (k != "model") put(k, v) }
             put("model", upstreamModel)
         }
+        if (spec.id == "opencode" || (spec.id == "opencode-zen" && OpenCodeFingerprint.isFreeLaneModel(upstreamModel))) {
+            payload = OpenCodeFingerprint.prepare(payload, upstreamModel)
+        }
         val path = if (spec.chatPath.startsWith("http")) spec.chatPath else baseUrl + spec.chatPath
         val builder = Request.Builder().url(path).post(payload.toString().toRequestBody(MEDIA_JSON))
-        authHeaders(spec, creds).forEach { (k, v) -> builder.header(k, v) }
+        authHeaders(spec, creds, upstreamModel, connectionId).forEach { (k, v) -> builder.header(k, v) }
         return builder.build()
     }
 

@@ -15,6 +15,7 @@ import {
 import { clientPingUrl, clientPingAny } from "./endpointPing";
 import useSettingsStore from "@/store/settingsStore";
 import EndpointRow from "./components/EndpointRow";
+import ProviderUptimeCard from "./components/ProviderUptimeCard";
 import StatusAlert from "./components/StatusAlert";
 import Tooltip from "./components/Tooltip";
 import SecurityWarning from "./components/SecurityWarning";
@@ -974,6 +975,9 @@ export default function APIPageClient({ machineId }) {
           </div>
         )}
       </Card>
+
+      {/* Provider Uptime */}
+      <ProviderUptimeCard />
 
       {/* API Keys */}
       <Card id="require-api-key">

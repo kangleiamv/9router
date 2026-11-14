@@ -36,7 +36,7 @@ describe("opencodeTlsClient proxy-aware sessions", () => {
     createSessionMock.mockResolvedValue(makeSession(vi.fn().mockResolvedValue(new Response("ok", { status: 200 }))));
 
     const { opencodeTlsFetch, __test__ } = await import("../../open-sse/services/opencodeTlsClient.js");
-    await opencodeTlsFetch("https://opencode.ai/inference/v1/chat/completions", { method: "POST", body: "{}" },
+    await opencodeTlsFetch("https://opencode.ai/inference/openai/v1/chat/completions", { method: "POST", body: "{}" },
       { proxyUrl: "socks5://127.0.0.1:9050" });
 
     expect(createSessionMock).toHaveBeenCalledTimes(1);
@@ -126,7 +126,7 @@ describe("proxyAwareFetch delegates the proxy to the transport adapter", () => {
     const adapter = Object.assign(vi.fn().mockResolvedValue(new Response("ok", { status: 200 })), { proxyCapable: true });
     const { proxyAwareFetch } = await import("../../open-sse/utils/proxyFetch.js");
 
-    await proxyAwareFetch("https://opencode.ai/inference/v1/chat/completions", {
+    await proxyAwareFetch("https://opencode.ai/inference/openai/v1/chat/completions", {
       method: "POST",
       body: "{}",
       directFetch: adapter,

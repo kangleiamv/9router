@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PROVIDERS } from "../../open-sse/config/providers.js";
 import { OpenCodeExecutor } from "../../open-sse/executors/opencode.js";
 import { proxyAwareFetch } from "../../open-sse/utils/proxyFetch.js";
@@ -8,88 +8,96 @@ vi.mock("../../open-sse/utils/proxyFetch.js", () => ({
   proxyAwareFetch: vi.fn(async () => ({ ok: true, status: 200, headers: { get: () => "" } })),
 }));
 
-// Break caught: opencode/muse-spark-1.3-contributor-free 400 vì upstream
-// chỉ nhận tool_choice "auto"; named/required/none phải demote sang "auto".
-const FREE_13 = "muse-spark-1.3-contributor-free";
+// Live catalog capabilities.tools.choice == ["auto"] for these chat models;
+// anything else is answered with 400. The other free ids keep their choice.
+const AUTO_ONLY = ["glm-5.3-flash-free", "mimo-v2.6-flash-free", "minimax-m3.1-flash-free"];
+const UNRESTRICTED = "deepseek-v4.1-flash-free";
 const CREDS = { connectionId: "opencode-free-tool-choice-test" };
-const INPUT = [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }];
-const TOOLS = [{ type: "function", name: "get_weather", description: "w", parameters: { type: "object", properties: {} } }];
-// Free-tier gate: client tools pass through verbatim, then the fingerprint
-// read/shell definitions are appended or upstream answers 403 FreeTierError.
-const WIRE_TOOLS = [...TOOLS, ...OPENCODE_FINGERPRINT_TOOLS.map((name) => expect.objectContaining({ type: "function", name }))];
+const USER_MESSAGE = { role: "user", content: "hi" };
+const TOOL = { type: "function", function: { name: "get_weather", description: "w", parameters: { type: "object", properties: {} } } };
+const WIRE_TOOLS = [
+  TOOL,
+  ...OPENCODE_FINGERPRINT_TOOLS.map((name) =>
+    expect.objectContaining({ type: "function", function: expect.objectContaining({ name }) })),
+];
 
-function responsesBody(model, tool_choice) {
-  const body = { model, input: structuredClone(INPUT), tools: structuredClone(TOOLS) };
-  if (tool_choice !== undefined) body.tool_choice = tool_choice;
-  return body;
+function chatBody(overrides = {}) {
+  return {
+    messages: [structuredClone(USER_MESSAGE)],
+    tools: [structuredClone(TOOL)],
+    ...overrides,
+  };
 }
 
-describe("opencode Free 1.3 tool_choice auto-only", () => {
-  it("khai quirk đúng model 1.3-Free trong registry", () => {
-    expect(PROVIDERS.opencode.quirks?.forceAutoToolChoiceModels).toEqual([FREE_13]);
+beforeEach(() => {
+  proxyAwareFetch.mockClear();
+});
+
+describe("opencode free chat tool_choice", () => {
+  it("declares the auto-only quirk for the live restricted models only", () => {
+    expect(PROVIDERS.opencode.quirks?.forceAutoToolChoiceModels).toEqual(AUTO_ONLY);
   });
 
   it.each([
-    ["Responses named", { type: "function", name: "get_weather" }],
-    ["Chat function named", { type: "function", function: { name: "get_weather" } }],
-    ["Claude tool named", { type: "tool", name: "get_weather" }],
+    ["named", { type: "function", function: { name: "get_weather" } }],
     ["required", "required"],
     ["none", "none"],
-  ])("demote %s sang auto (plain và max)", (_label, choice) => {
-    for (const model of [FREE_13, `${FREE_13}(max)`]) {
-      const body = responsesBody(model, structuredClone(choice));
-      const out = new OpenCodeExecutor().transformRequest(model, body, true, CREDS);
-      expect(out.tool_choice).toBe("auto");
-      expect(out.tools).toEqual(WIRE_TOOLS);
-      expect(out.input).toEqual(INPUT);
+  ])("demotes %s to auto on auto-only models", (_label, choice) => {
+    for (const model of AUTO_ONLY) {
+      for (const suffix of ["", "(max)"]) {
+        const out = new OpenCodeExecutor().transformRequest(
+          `${model}${suffix}`,
+          chatBody({ tool_choice: structuredClone(choice) }),
+          true,
+          CREDS,
+        );
+        expect(out.tool_choice).toBe("auto");
+        expect(out.tools).toEqual(WIRE_TOOLS);
+        expect(out.messages.at(-1)).toEqual(USER_MESSAGE);
+      }
     }
   });
 
-  it("giữ auto và absent; tools/input nguyên vẹn", () => {
+  it("keeps auto and absent; tools/messages stay intact", () => {
     const autoOut = new OpenCodeExecutor().transformRequest(
-      FREE_13, responsesBody(FREE_13, "auto"), true, CREDS,
+      AUTO_ONLY[0], chatBody({ tool_choice: "auto" }), true, CREDS,
     );
     expect(autoOut.tool_choice).toBe("auto");
     expect(autoOut.tools).toEqual(WIRE_TOOLS);
-    expect(autoOut.input).toEqual(INPUT);
+    expect(autoOut.messages.at(-1)).toEqual(USER_MESSAGE);
 
     const absentOut = new OpenCodeExecutor().transformRequest(
-      FREE_13, responsesBody(FREE_13, undefined), true, CREDS,
+      AUTO_ONLY[0], chatBody(), true, CREDS,
     );
-    // Fingerprint pass fills an absent choice with "auto" (the API default once tools exist).
-    expect(absentOut.tool_choice).toBe("auto");
+    expect(absentOut.tool_choice).toBeUndefined();
     expect(absentOut.tools).toEqual(WIRE_TOOLS);
-    expect(absentOut.input).toEqual(INPUT);
   });
 
-  it.each([
-    ["1.2-Free", "muse-spark-1.2-contributor-free"],
-    ["future 1.4-Free", "muse-spark-1.4-contributor-free"],
-    ["Go id", "muse-spark-1.3-contributor"],
-    ["non-Muse", "big-pickle"],
-  ])("không đổi tool_choice của %s", (_label, model) => {
-    const choice = { type: "function", name: "get_weather" };
-    const body = responsesBody(model, structuredClone(choice));
-    const out = new OpenCodeExecutor().transformRequest(model, body, true, CREDS);
+  it("does not touch tool_choice on unrestricted free models", () => {
+    const choice = { type: "function", function: { name: "get_weather" } };
+    const out = new OpenCodeExecutor().transformRequest(
+      UNRESTRICTED, chatBody({ tool_choice: structuredClone(choice) }), true, CREDS,
+    );
     expect(out.tool_choice).toEqual(choice);
   });
 
-  it("wire: execute gửi choice auto tới /inference/v1/responses", async () => {
-    proxyAwareFetch.mockClear();
+  it("wire: execute sends the demoted choice to /inference/openai/v1/chat/completions", async () => {
     const ex = new OpenCodeExecutor();
-    const body = responsesBody(FREE_13, { type: "function", name: "get_weather" });
+    const model = AUTO_ONLY[0];
     const { url, transformedBody } = await ex.execute({
-      model: FREE_13, body, stream: true, credentials: CREDS,
+      model,
+      body: chatBody({ tool_choice: { type: "function", function: { name: "get_weather" } } }),
+      stream: true,
+      credentials: CREDS,
     });
-    expect(url).toBe("https://opencode.ai/inference/v1/responses");
+    expect(url).toBe("https://opencode.ai/inference/openai/v1/chat/completions");
     expect(transformedBody.tool_choice).toBe("auto");
     expect(proxyAwareFetch).toHaveBeenCalledTimes(1);
     const [actualUrl, actualInit] = proxyAwareFetch.mock.calls[0];
-    expect(actualUrl).toBe("https://opencode.ai/inference/v1/responses");
+    expect(actualUrl).toBe("https://opencode.ai/inference/openai/v1/chat/completions");
     const sent = JSON.parse(actualInit.body);
     expect(sent.tool_choice).toBe("auto");
-    expect(sent.model).toBe(FREE_13);
+    expect(sent.model).toBe(model);
     expect(sent.tools).toEqual(WIRE_TOOLS);
-    expect(sent.input).toEqual(INPUT);
   });
 });

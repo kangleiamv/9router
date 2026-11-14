@@ -18,7 +18,8 @@ import {
 
 // OpenCode v2 UA shape: opencode/<channel>/<version>/<client>. Upstream rejects
 // the v1 "opencode/1.18.x" form with 403 FreeTierError since 2026-10-14.
-const OPENCODE_UA = "opencode/latest/2.0.26/cli";
+// Track the current stable release (2.3.0, 2026-11-13).
+const OPENCODE_UA = "opencode/latest/2.3.0/cli";
 const OPENCODE_CLIENT = "cli";
 const MAX_SESSION_LENGTH = 256;
 const MAX_TOOL_NAME_LEN = 128;
@@ -38,8 +39,10 @@ const OPENCODE_OVERLOAD_RE = /overloaded/i;
 /**
  * Classify a gated free-lane rejection:
  * - "overload": transient 429 load shedding, worth retrying.
- * - "session":  any other 429 (FreeUsageLimitError) or 403, which can mean the
- *               session id itself is spent or flagged.
+ * - "quota":    FreeUsageLimitError. The free lane is metered per egress IP and
+ *               resets on a ~20 h window; retrying or minting another session
+ *               cannot help, so surface it immediately.
+ * - "session":  403, which can mean the session id itself is spent or flagged.
  * - null:       anything else.
  */
 async function classifyRejection(response) {
@@ -49,10 +52,30 @@ async function classifyRejection(response) {
   try {
     // The body is the response stream; clone it so a non-retryable 429 is still
     // delivered intact to the caller.
-    return OPENCODE_OVERLOAD_RE.test(await response.clone().text()) ? "overload" : "session";
+    const text = await response.clone().text();
+    if (/freeusagelimiterror|free usage limit/i.test(text)) return "quota";
+    return OPENCODE_OVERLOAD_RE.test(text) ? "overload" : "session";
   } catch {
     return "session";
   }
+}
+
+/** Parse Retry-After seconds or an HTTP date into an epoch-ms reset time. */
+function parseRetryAfterMs(value) {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Date.now() + seconds * 1000;
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? date : undefined;
+}
+
+function formatResetWindow(resetsAtMs) {
+  if (!resetsAtMs) return "";
+  const minutes = Math.max(1, Math.ceil((resetsAtMs - Date.now()) / 60000));
+  if (minutes < 60) return ` Resets in ~${minutes}m.`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return ` Resets in ~${hours}h${rest ? ` ${rest}m` : ""}.`;
 }
 
 function sleep(ms, signal) {
@@ -68,12 +91,7 @@ function hasValidOpencodeVersion(ua) {
   const m = String(ua || "").match(/^opencode\/[a-z0-9-]+\/(\d+)\.\d+\.\d+\/[a-z0-9-]+$/i);
   return !!m && parseInt(m[1], 10) >= 2;
 }
-// Models served by /inference/v1/responses; every other model stays on /chat/completions.
-const RESPONSES_MODELS = new Set([
-  "muse-spark-1.2-contributor-free",
-  "muse-spark-1.3-contributor-free",
-]);
-const MESSAGES_MODELS = new Set(["union-alpha"]);
+
 
 let lastTimestamp = 0;
 let counter = 0;
@@ -264,13 +282,20 @@ function baseModelId(model) {
   return String(model || "").replace(/\([^()]+\)\s*$/, "").trim();
 }
 
+// Free ids keep their catalog endpoint: every live free model is served by
+// /inference/openai/v1/chat/completions (minimax-m3.1-flash-free included),
+// even when the same family is messages-only on the paid lane.
 function isResponsesModel(model) {
   const base = baseModelId(model);
-  return RESPONSES_MODELS.has(base) || isMuseSparkModel(base);
+  if (isMuseSparkModel(base)) return true;
+  if (/-free$/i.test(base)) return false;
+  return /^(gpt|grok|muse-(?:ember|wonder))/i.test(base);
 }
 
 function isMessagesModel(model) {
-  return MESSAGES_MODELS.has(baseModelId(model));
+  const base = baseModelId(model);
+  if (/-free$/i.test(base)) return false;
+  return base === "union-alpha" || /^claude/i.test(base) || /^(qwen|minimax)/i.test(base);
 }
 
 function resolveOpencodeSession(body, credentials, providerSessionId, clientTool) {
@@ -408,6 +433,41 @@ export class OpenCodeExecutor extends BaseExecutor {
     super("opencode", PROVIDERS.opencode);
   }
 
+  /** Turn OpenCode's opaque gate errors into actionable dashboard messages. */
+  parseError(response, bodyText) {
+    const status = response?.status;
+    const text = String(bodyText || "");
+    if (status === 429 && /freeusagelimiterror|free usage limit/i.test(text)) {
+      const resetsAtMs = parseRetryAfterMs(response.headers?.get?.("retry-after"));
+      return {
+        status: 429,
+        message:
+          "OpenCode Free quota is exhausted for this egress IP (FreeUsageLimitError). " +
+          "Free models are only available inside OpenCode; add a proxy pool with a fresh IP " +
+          "or use an OpenCode Zen/Go key." +
+          formatResetWindow(resetsAtMs),
+        resetsAtMs,
+      };
+    }
+    if (status === 400 && /model is unavailable/i.test(text)) {
+      return {
+        status: 400,
+        message:
+          "OpenCode rejected this model id as unavailable. Refresh the provider's model list " +
+          "and pick a current free model; retired ids (muse-spark-* / union-alpha / jev-*) no longer exist.",
+      };
+    }
+    if (status === 403 && /freetiererror|free tier/i.test(text)) {
+      return {
+        status: 403,
+        message:
+          "OpenCode refused the free-tier identity for this request. Free models are only " +
+          "available inside OpenCode; add a proxy pool or use an OpenCode Zen/Go key.",
+      };
+    }
+    return null;
+  }
+
   prepareRequestCredentials({ body, credentials, providerSessionId, clientTool } = {}) {
     const sourceCredentials = credentials || {};
     const session = resolveOpencodeSession(body, sourceCredentials, providerSessionId, clientTool);
@@ -423,12 +483,15 @@ export class OpenCodeExecutor extends BaseExecutor {
     // Zen rejects non-streaming requests on free models with 403 FreeTierError;
     // always stream upstream and let the handler layer aggregate for non-stream clients.
     if (body && typeof body === "object") body.stream = true;
+    // Only the models whose live catalog advertises tools.choice ["auto"]
+    // accept an explicit choice; anything else is a 400 on the free lane.
+    const forceAutoToolChoice = this.config.quirks?.forceAutoToolChoiceModels
+      ?.includes(baseModelId(model || body?.model));
+    if (forceAutoToolChoice && body && typeof body === "object"
+      && "tool_choice" in body && body.tool_choice !== "auto") {
+      body.tool_choice = "auto";
+    }
     if (isResponsesModel(model || body?.model) && body && typeof body === "object") {
-      // ponytail: chỉ model đã xác nhận auto-only; mở allowlist khi có bằng chứng.
-      if ("tool_choice" in body && body.tool_choice !== "auto"
-        && this.config.quirks?.forceAutoToolChoiceModels?.includes(baseModelId(model))) {
-        body.tool_choice = "auto";
-      }
       const normalized = normalizeResponsesInput(body.input);
       if (normalized) body.input = normalized;
       if (!Array.isArray(body.input) || body.input.length === 0) {
@@ -483,6 +546,18 @@ export class OpenCodeExecutor extends BaseExecutor {
     for (let attempt = 1; ; attempt++) {
       const result = await run();
       const rejection = await classifyRejection(result?.response);
+      if (rejection === "quota") {
+        // FreeUsageLimitError is egress-metered and resets hours later. A new
+        // session or an immediate retry only burns requests, so return it with
+        // the upstream Retry-After intact for the dashboard to display. The
+        // spent session is still dropped: once the window resets the next
+        // request should start clean instead of reusing a flagged id.
+        if (forgetOpencodeSession(credentials[SESSION_FIELD])) {
+          args.log?.debug?.("SESSION", "OpenCode 429 quota: dropped cached session, next request re-mints");
+        }
+        args.log?.debug?.("QUOTA", "OpenCode free lane quota exhausted for this egress; not retrying");
+        return result;
+      }
       if (rejection === "session") {
         // A client-supplied native session is not ours to replace; this only
         // drops ids we minted, so the next request starts on a fresh one.
@@ -506,13 +581,15 @@ export class OpenCodeExecutor extends BaseExecutor {
     }
   }
 
-  // Free tier moved from /zen/v1 to /inference/v1 (OpenCode v2); /zen/v1 now
-  // answers every free request with 403 FreeTierError.
+  // OpenCode v2.3 routes each wire format from the model's own catalog `api`
+  // entry: chat-completions under /inference/openai/v1, messages under
+  // /inference/anthropic/v1. The legacy /inference/v1 path and /zen/v1 gate
+  // now reject free requests.
   buildUrl(model) {
     const base = this.config.baseUrl;
-    if (isResponsesModel(model)) return `${base}/inference/v1/responses`;
-    if (isMessagesModel(model)) return `${base}/inference/v1/messages`;
-    return `${base}/inference/v1/chat/completions`;
+    if (isResponsesModel(model)) return `${base}/inference/openai/v1/responses`;
+    if (isMessagesModel(model)) return `${base}/inference/anthropic/v1/messages`;
+    return `${base}/inference/openai/v1/chat/completions`;
   }
 
   buildHeaders(credentials, stream = true, url = "") {

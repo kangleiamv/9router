@@ -29,6 +29,7 @@ import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
 import { getKeyAccessContext, enforceKeyAccess, filterAdapterModels } from "../services/keyAccess.js";
 import { resolveSmartChoice } from "../services/systemoneRouter.js";
 import { notifyComboFallback } from "@/lib/telegram/notify.js";
+import { recordProviderUptime } from "@/lib/db/repos/uptimeRepo.js";
 
 /**
  * Handle chat completion request
@@ -314,6 +315,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     // Use shared chatCore
     const chatSettings = await getSettings();
     const providerThinking = (chatSettings.providerThinking || {})[provider] || null;
+    const attemptStartedAt = Date.now();
     const result = await handleChatCore({
       body: { ...body, model: `${provider}/${model}` },
       modelInfo: { provider, model },
@@ -359,6 +361,15 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         clearAntigravityStrikes(credentials.connectionId, model);
       }
     });
+
+    // Record the upstream outcome before any fallback: one sample per attempt
+    // keeps provider uptime honest about failures that trigger account rotation.
+    recordProviderUptime({
+      provider,
+      ok: !!result.success,
+      status: result.success ? 200 : result.status,
+      latencyMs: Date.now() - attemptStartedAt,
+    }).catch(() => {});
 
     if (result.success) return result.response;
 

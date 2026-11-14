@@ -13,6 +13,7 @@ function isLLMProvider(id) {
 import Badge from "./Badge";
 import Card from "./Card";
 import OverviewCards from "@/app/(dashboard)/dashboard/usage/components/OverviewCards";
+import ProviderLimits from "@/app/(dashboard)/dashboard/usage/components/ProviderLimits";
 import UsageTable, { fmt, fmtTime } from "@/app/(dashboard)/dashboard/usage/components/UsageTable";
 import dynamic from "next/dynamic";
 // Lazy-load: keeps @xyflow/react and recharts out of the initial bundle
@@ -470,6 +471,19 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
 
       {/* Overview cards */}
       {loading ? spinner : <OverviewCards stats={stats} />}
+
+      {/* Live provider usage / quotas */}
+      {!loading && (
+        <div className="flex flex-col gap-3">
+          <div>
+            <h2 className="text-sm font-semibold text-text-main">Provider usage</h2>
+            <p className="text-xs text-text-muted">
+              Live quota windows and remaining limits for each connected provider.
+            </p>
+          </div>
+          <ProviderLimits />
+        </div>
+      )}
 
       {/* Provider topology + Recent Requests */}
       {loading ? spinner : (

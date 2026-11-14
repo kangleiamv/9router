@@ -1,6 +1,10 @@
 /**
- * OpenCode Zen usage — GET https://opencode.ai/zen/v1/usage
- * Auth: Bearer <apiKey>
+ * OpenCode Zen usage.
+ *
+ * Pay-as-you-go (Console) does not expose a public usage endpoint: the Billing
+ * drawer reads an internal console route that rejects API keys. The registry
+ * therefore omits transport.usage and this handler reports that clearly instead
+ * of calling the retired /zen/v1/usage route (HTTP 404).
  */
 
 import { proxyAwareFetch } from "../../utils/proxyFetch.js";
@@ -26,6 +30,15 @@ export async function getOpenCodeZenUsage(apiKey = null, proxyOptions = null) {
   if (!apiKey || typeof apiKey !== "string" || !apiKey.trim()) {
     return {
       message: "OpenCode Zen API key not available. Add a key to view usage.",
+    };
+  }
+
+  if (!USAGE_URL) {
+    return {
+      plan: "OpenCode Zen",
+      message:
+        "OpenCode Zen (pay-as-you-go) does not expose usage over the API. " +
+        "Check credits and spend in the OpenCode Console Billing drawer.",
     };
   }
 

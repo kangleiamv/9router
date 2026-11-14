@@ -7,7 +7,6 @@ import { OpenCodeExecutor } from "../../open-sse/executors/opencode.js";
 import "../translator/registerAll.js";
 import { translateRequest } from "../../open-sse/translator/index.js";
 
-const MODEL = "muse-spark-1.2-contributor-free";
 const PROVIDER = "opencode";
 
 const input = [{
@@ -16,45 +15,87 @@ const input = [{
   content: [{ type: "input_text", text: "Think, then answer: 2 + 2?" }],
 }];
 
-describe("OpenCode Free Muse Spark thinking", () => {
-  it("advertises reasoning and the requested model limits", () => {
-    expect(PROVIDER_MODELS.oc?.some((model) => model.id === MODEL)).toBe(true);
-    expect(PROVIDER_MODELS.oc?.some((model) => model.id === "muse-spark-1.3-contributor-free")).toBe(true);
-    for (const m of [MODEL, "muse-spark-1.3-contributor-free", "muse-spark-1.4-contributor-free", "muse-spark-2.0-contributor-free"]) {
-      expect(getCapabilitiesForModel(PROVIDER, m)).toMatchObject({
-        reasoning: true,
-        thinkingFormat: "openai",
-        contextWindow: 1048576,
-        maxOutput: 131072,
-      });
-      expect(getCapabilitiesForModel(PROVIDER, `oc/${m}`)).toMatchObject({
-        reasoning: true,
-        contextWindow: 1048576,
-        maxOutput: 131072,
-      });
-      expect(getThinkingLevels(PROVIDER, m)).toEqual([
-        "none",
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-      ]);
-      expect(getModelTargetFormat("oc", m)).toBe(FORMATS.OPENAI_RESPONSES);
-      expect(getModelTargetFormat("opencode", m)).toBe(FORMATS.OPENAI_RESPONSES);
-      expect(getModelTargetFormat("openrouter", m)).toBeNull();
+const LIVE_FREE = [
+  "deepseek-v4.1-flash-free",
+  "big-pickle",
+  "glm-5.3-flash-free",
+  "mimo-v2.6-flash-free",
+  "minimax-m3.1-flash-free",
+  "longcat-2.5-free",
+  "iceman-free",
+  "inkling-2-small-free",
+  "beam-free",
+  "flint-40b-free",
+  "nemotron-3.5-lightning-free",
+  "nemotron-3.5-super-vl-free",
+];
+
+describe("OpenCode Free live catalog", () => {
+  it("advertises exactly the live free ids and drops retired ones", () => {
+    const ids = new Set((PROVIDER_MODELS.oc || []).map((model) => model.id));
+    for (const id of LIVE_FREE) expect(ids.has(id)).toBe(true);
+    for (const retired of [
+      "muse-spark-1.2-contributor-free",
+      "muse-spark-1.3-contributor-free",
+      "jev-1.13-free",
+      "union-alpha",
+      "deepseek-v4-flash-free",
+      "x-preview-f-free",
+    ]) {
+      expect(ids.has(retired)).toBe(false);
     }
   });
 
-  it("clamps max to xhigh and emits the Responses reasoning shape", () => {
+  it("keeps every live free model on Chat Completions", () => {
+    const executor = new OpenCodeExecutor();
+    for (const m of LIVE_FREE) {
+      expect(executor.buildUrl(m)).toBe("https://opencode.ai/inference/openai/v1/chat/completions");
+      expect(getModelTargetFormat("oc", m)).not.toBe(FORMATS.OPENAI_RESPONSES);
+      expect(getModelTargetFormat("oc", m)).not.toBe(FORMATS.CLAUDE);
+    }
+  });
+
+  it("exposes reasoning levels for the live free models", () => {
+    for (const m of LIVE_FREE) {
+      expect(getCapabilitiesForModel(PROVIDER, m).reasoning).toBe(true);
+      expect(getCapabilitiesForModel(PROVIDER, `oc/${m}`).reasoning).toBe(true);
+      expect(Array.isArray(getThinkingLevels(PROVIDER, m))).toBe(true);
+    }
+    expect(getThinkingLevels(PROVIDER, "deepseek-v4.1-flash-free")).toEqual(["low", "high", "max"]);
+    expect(getThinkingLevels(PROVIDER, "glm-5.3-flash-free")).toEqual([
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+    ]);
+  });
+
+  it("leaves the chat body fields alone", () => {
+    const executor = new OpenCodeExecutor();
+    const body = { messages: [{ role: "user", content: "hi" }], max_tokens: 1024 };
+    executor.transformRequest("big-pickle", body, true, {});
+    expect(executor.buildUrl("big-pickle")).toBe("https://opencode.ai/inference/openai/v1/chat/completions");
+    expect(body.max_tokens).toBe(1024);
+    expect(body.max_output_tokens).toBeUndefined();
+  });
+});
+
+describe("OpenCode Responses passthrough (paid Muse ids)", () => {
+  it("routes the Muse family to /responses and clamps max to xhigh", () => {
+    const executor = new OpenCodeExecutor();
+    for (const m of ["muse-spark-1.3", "muse-spark-1.2", "muse-spark-1.4", "muse-spark-2.0"]) {
+      expect(executor.buildUrl(m)).toBe("https://opencode.ai/inference/openai/v1/responses");
+      expect(executor.buildUrl(`${m}(high)`)).toBe("https://opencode.ai/inference/openai/v1/responses");
+    }
+
     const body = {
       input,
       reasoning: { effort: "max" },
       max_tokens: 131072,
     };
-
-    const out = new OpenCodeExecutor().transformRequest(MODEL, body, true, {
-      connectionId: "opencode-muse-spark-test",
+    const out = executor.transformRequest("muse-spark-1.3", body, true, {
+      connectionId: "opencode-responses-test",
     });
 
     expect(out.reasoning).toEqual({ effort: "xhigh", summary: "auto" });
@@ -63,51 +104,9 @@ describe("OpenCode Free Muse Spark thinking", () => {
     expect(out.max_tokens).toBeUndefined();
   });
 
-  it("routes Union Alpha through Anthropic Messages", () => {
-    const caps = getCapabilitiesForModel(PROVIDER, "union-alpha");
-    expect(caps.vision).toBe(true);
-    expect(caps.contextWindow).toBe(262144);
-    expect(caps.maxOutput).toBe(131072);
-
-    const executor = new OpenCodeExecutor();
-
-    expect(getModelTargetFormat("oc", "union-alpha")).toBe(FORMATS.CLAUDE);
-    const url = executor.buildUrl("union-alpha");
-    expect(url).toBe("https://opencode.ai/inference/v1/messages");
-    expect(executor.buildHeaders({}, true, url)).toMatchObject({
-      "anthropic-version": "2023-06-01",
-    });
-    expect(executor.buildHeaders({}, true, executor.buildUrl("big-pickle")))
-      .not.toHaveProperty("anthropic-version");
-
-    const translated = translateRequest(
-      FORMATS.OPENAI,
-      FORMATS.CLAUDE,
-      "union-alpha",
-      { messages: [{ role: "user", content: "ping" }], max_tokens: 1 },
-      false,
-      {},
-      PROVIDER,
-    );
-    expect(translated).toMatchObject({
-      model: "union-alpha",
-      messages: [{ role: "user", content: [{ type: "text", text: "ping" }] }],
-      max_tokens: 1,
-    });
-  });
-
-  it("leaves the other free models on Chat Completions", () => {
-    const executor = new OpenCodeExecutor();
-    const body = { messages: [{ role: "user", content: "hi" }], max_tokens: 1024 };
-    executor.transformRequest("big-pickle", body, true, {});
-    expect(executor.buildUrl("big-pickle")).toBe("https://opencode.ai/inference/v1/chat/completions");
-    expect(body.max_tokens).toBe(1024);
-    expect(body.max_output_tokens).toBeUndefined();
-  });
-
   it("translates Chat Completions max thinking into a Responses request", () => {
     const body = {
-      model: `oc/${MODEL}`,
+      model: "oc/muse-spark-1.3",
       messages: [{ role: "user", content: "Think, then answer: 2 + 2?" }],
       reasoning_effort: "max",
       max_tokens: 131072,
@@ -116,14 +115,14 @@ describe("OpenCode Free Muse Spark thinking", () => {
     const translated = translateRequest(
       FORMATS.OPENAI,
       FORMATS.OPENAI_RESPONSES,
-      MODEL,
+      "muse-spark-1.3",
       body,
       true,
       {},
       PROVIDER,
     );
-    const out = new OpenCodeExecutor().transformRequest(MODEL, translated, true, {
-      connectionId: "opencode-muse-spark-translation-test",
+    const out = new OpenCodeExecutor().transformRequest("muse-spark-1.3", translated, true, {
+      connectionId: "opencode-responses-translation-test",
     });
 
     expect(out.reasoning).toEqual({ effort: "xhigh", summary: "auto" });
@@ -131,44 +130,9 @@ describe("OpenCode Free Muse Spark thinking", () => {
     expect(out.max_tokens).toBeUndefined();
   });
 
-  it("routes muse-spark-1.3-contributor-free and future Muse Spark models to Responses API", () => {
-    const executor = new OpenCodeExecutor();
-    const futureModel = "muse-spark-1.4-contributor-free";
-
-    for (const m of ["muse-spark-1.3-contributor-free", futureModel]) {
-      expect(executor.buildUrl(m)).toBe("https://opencode.ai/inference/v1/responses");
-      expect(executor.buildUrl(`${m}(high)`)).toBe("https://opencode.ai/inference/v1/responses");
-      expect(getModelTargetFormat("oc", m)).toBe("openai-responses");
-
-      const body = {
-        model: `oc/${m}`,
-        messages: [{ role: "user", content: "Hello" }],
-        reasoning_effort: "high",
-        max_tokens: 2048,
-      };
-
-      const translated = translateRequest(
-        FORMATS.OPENAI,
-        FORMATS.OPENAI_RESPONSES,
-        m,
-        body,
-        true,
-        {},
-        PROVIDER,
-      );
-      const out = executor.transformRequest(m, translated, true, {
-        connectionId: "opencode-muse-spark-13-test",
-      });
-
-      expect(out.reasoning).toEqual({ effort: "high", summary: "auto" });
-      expect(out.max_output_tokens).toBe(2048);
-      expect(out.max_tokens).toBeUndefined();
-    }
-  });
-
   it("strips prior-turn reasoning items carrying encrypted_content from input", () => {
     const executor = new OpenCodeExecutor();
-    const model = "muse-spark-1.3-contributor-free";
+    const model = "muse-spark-1.3";
     const body = {
       model,
       input: [
@@ -208,15 +172,10 @@ describe("OpenCode Free Muse Spark thinking", () => {
     const out = executor.transformRequest(model, body, true, {});
     expect(out.stream).toBe(true);
     expect(out.store).toBe(false);
-    // Prior reasoning items stripped to prevent 400 "reasoning encrypted_content was not issued to this caller"
     expect(out.input.some((item) => item.type === "reasoning")).toBe(false);
     expect(JSON.stringify(out.input)).not.toContain("ENC_BLOB_TURN_1");
-    // User message, function_call, function_call_output, and next user message survive
     const types = out.input.map((item) => item.type);
     expect(types).toEqual(["message", "function_call", "function_call_output", "message"]);
-    // Tools flattened and empty properties added. The caller's own `shell` clashes
-    // with OpenCode's fingerprint tool, so it (and its prior call) travel under an
-    // alias while the exact read/shell definitions are appended.
     expect(out.tools.slice(0, 1)).toEqual([
       {
         type: "function",

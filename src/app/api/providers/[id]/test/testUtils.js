@@ -872,8 +872,8 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
         return { valid, error: valid ? null : "Session expired — re-paste cookie" };
       }
       case "opencode": {
-        const res = await fetchWithConnectionProxy("https://opencode.ai/zen/v1/models", {
-          headers: { Authorization: "Bearer public", "User-Agent": "opencode/1.18.31" },
+        const res = await fetchWithConnectionProxy("https://opencode.ai/inference/v1/models", {
+          headers: { Authorization: "Bearer public", "User-Agent": "opencode/latest/2.3.0/cli" },
         }, effectiveProxy);
         return { valid: res.ok, error: res.ok ? null : "OpenCode free tier unavailable" };
       }
@@ -887,13 +887,14 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
         return { valid, error: valid ? null : "Invalid API key" };
       }
       case "opencode-zen": {
-        const res = await fetchWithConnectionProxy("https://opencode.ai/zen/v1/chat/completions", {
+        const res = await fetchWithConnectionProxy("https://opencode.ai/inference/openai/v1/chat/completions", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${connection.apiKey}`,
-            "x-opencode-client": "desktop",
-            "User-Agent": "opencode/1.18.31",
+            "x-opencode-client": "cli",
+            "x-opencode-project": "global",
+            "User-Agent": "opencode/latest/2.3.0/cli",
           },
           body: JSON.stringify({
             model: PROVIDERS["opencode-zen"]?.validationModel || getDefaultModel("ocz"),

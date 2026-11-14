@@ -174,8 +174,8 @@ describe("OpenCode Free Executor Session Resolution", () => {
     const executor = getExecutor("opencode");
     const credentials = makeCredentials();
     const result = await executor.execute({
-      model: "muse-spark-1.3-contributor-free",
-      body: { input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] }] },
+      model: "deepseek-v4.1-flash-free",
+      body: { messages: [{ role: "user", content: "hello" }] },
       stream: false,
       credentials,
       providerSessionId: "conversation-fetch-test",
@@ -198,7 +198,7 @@ describe("OpenCode Free Executor Session Resolution", () => {
   });
   it("handles null or undefined body gracefully in transformRequest", () => {
     const executor = getExecutor("opencode");
-    expect(() => executor.transformRequest("muse-spark-1.3-contributor-free", null, false, {})).not.toThrow();
+    expect(() => executor.transformRequest("muse-spark-1.3", null, false, {})).not.toThrow();
     expect(() => executor.transformRequest("big-pickle", undefined, false, {})).not.toThrow();
   });
 });
@@ -207,16 +207,16 @@ describe("OpenCode Free User-Agent Validation", () => {
   it("defaults User-Agent to the v2 CLI form for non-opencode downstream clients", () => {
     const executor = getExecutor("opencode");
     const headersNoUa = executor.buildHeaders({});
-    expect(headersNoUa["User-Agent"]).toBe("opencode/latest/2.0.26/cli");
+    expect(headersNoUa["User-Agent"]).toBe("opencode/latest/2.3.0/cli");
 
     const headersClaude = executor.buildHeaders({ rawHeaders: { "user-agent": "Claude-Code/1.0" } });
-    expect(headersClaude["User-Agent"]).toBe("opencode/latest/2.0.26/cli");
+    expect(headersClaude["User-Agent"]).toBe("opencode/latest/2.3.0/cli");
   });
 
   it("replaces v1-style opencode User-Agents, which upstream now rejects with 403", () => {
     const executor = getExecutor("opencode");
     for (const ua of ["opencode", "opencode/1.15.0", "opencode/1.18.31 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14"]) {
-      expect(executor.buildHeaders({ rawHeaders: { "user-agent": ua } })["User-Agent"]).toBe("opencode/latest/2.0.26/cli");
+      expect(executor.buildHeaders({ rawHeaders: { "user-agent": ua } })["User-Agent"]).toBe("opencode/latest/2.3.0/cli");
     }
   });
 
@@ -297,7 +297,7 @@ describe("OpenCode Stable Session Reuse (429 follow-up)", () => {
   it("applies the read/shell free-tier fingerprint on Chat Completions", () => {
     const executor = getExecutor("opencode");
 
-    const chatNoTools = executor.transformRequest("nemotron-3-ultra-free", {
+    const chatNoTools = executor.transformRequest("deepseek-v4.1-flash-free", {
       messages: [{ role: "user", content: "hi" }],
     });
     expect(chatNoTools.stream).toBe(true);
@@ -306,7 +306,7 @@ describe("OpenCode Stable Session Reuse (429 follow-up)", () => {
     expect(chatNoTools.tools.map((t) => t.function?.name)).toEqual(["read", "shell"]);
     expect(chatNoTools.messages[0].role).toBe("system");
 
-    const chatWithTools = executor.transformRequest("nemotron-3-ultra-free", {
+    const chatWithTools = executor.transformRequest("deepseek-v4.1-flash-free", {
       messages: [{ role: "user", content: "hi" }],
       tools: [
         { type: "function", function: { name: "Bash", description: "Claude Code tool" } },
@@ -317,7 +317,7 @@ describe("OpenCode Stable Session Reuse (429 follow-up)", () => {
     expect(chatWithTools.tool_choice).toBe("auto");
     expect(chatWithTools.tools.map((t) => t.function?.name)).toEqual(["Bash", "Read", "read", "shell"]);
 
-    const chatClash = executor.transformRequest("nemotron-3-ultra-free", {
+    const chatClash = executor.transformRequest("deepseek-v4.1-flash-free", {
       messages: [{ role: "user", content: "hi" }],
       tools: [{ type: "function", function: { name: "read", description: "existing" } }],
     });
@@ -327,7 +327,7 @@ describe("OpenCode Stable Session Reuse (429 follow-up)", () => {
 
   it("cloaks Muse Responses requests even when the client already supplies tools", () => {
     const executor = getExecutor("opencode");
-    const transformed = executor.transformRequest("muse-spark-1.3-contributor-free(xhigh)", {
+    const transformed = executor.transformRequest("muse-spark-1.3(xhigh)", {
       input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
       tools: [{
         type: "function",

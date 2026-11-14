@@ -74,7 +74,7 @@ function modelsUrlFor(provider, base) {
   const id = provider.id;
   if (id === "ollama") return "https://ollama.com/api/tags";
   if (id === "ollama-local") return "http://127.0.0.1:11434/api/tags";
-  if (id === "opencode") return "https://opencode.ai/zen/v1/models";
+  if (id === "opencode") return "https://opencode.ai/inference/v1/models";
   if (id === "perplexity") return "https://api.perplexity.ai/v1/models";
   if (id === "runcrate" || id === "synthetic") return `${base}/models`;
 
@@ -115,7 +115,8 @@ function transform(provider) {
 
   // Registry quirks that need an Android-specific endpoint.
   if (id === "opencode") {
-    base = "https://opencode.ai/inference/v1";
+    // Free models use the v2 OpenAI-compatible Chat Completions gateway.
+    base = "https://opencode.ai/inference/openai/v1";
     chatPath = "/chat/completions";
   }
   if (id === "ollama-cloud") {

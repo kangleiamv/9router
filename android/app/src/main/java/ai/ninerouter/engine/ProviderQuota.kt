@@ -87,8 +87,14 @@ object ProviderQuotaClient {
                     "groq" -> fetchGroq(key)
                     "glm", "glm-cn" -> fetchGlm(key, connection.provider)
                     "opencode-go" -> fetchOpenCode(key, "https://opencode.ai/inference/go/v1/usage", "OpenCode Go")
-                    "opencode-zen" -> fetchOpenCode(key, "https://opencode.ai/zen/v1/usage", "OpenCode Zen")
-                    "opencode" -> fetchOpenCode(key, "https://opencode.ai/zen/v1/usage", "OpenCode")
+                    // Console pay-as-you-go and the free lane expose no public
+                    // usage endpoint; their Billing drawer is dashboard-only.
+                    "opencode-zen" -> message(
+                        "OpenCode Zen usage is not exposed over the API. Check credits and spend in the OpenCode Console Billing drawer."
+                    )
+                    "opencode" -> message(
+                        "OpenCode Free has no usage API. Free quota is metered per egress IP inside OpenCode."
+                    )
                     "vercel-ai-gateway" -> fetchVercelGateway(key)
                     "ollama-cloud", "ollama" -> fetchOllamaCloud(key)
                     "minimax", "minimax-cn" -> fetchMiniMax(key, connection.provider)

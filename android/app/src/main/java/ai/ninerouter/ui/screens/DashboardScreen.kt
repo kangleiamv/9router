@@ -18,6 +18,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Layers
@@ -45,6 +46,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import ai.ninerouter.core.ProxyRuntime
+import ai.ninerouter.core.TunnelStatus
 import ai.ninerouter.data.model.RequestDetail
 import ai.ninerouter.ui.MainViewModel
 import ai.ninerouter.ui.components.AppCard
@@ -86,6 +88,7 @@ fun DashboardScreen(
     val running by viewModel.running.collectAsState()
     val port by viewModel.port.collectAsState()
     val lastError by viewModel.lastError.collectAsState()
+    val tunnel by viewModel.tunnelState.collectAsState()
     val clipboard = LocalClipboardManager.current
     var copied by remember { mutableStateOf(false) }
     val endpoint = "http://127.0.0.1:$port/v1"
@@ -123,6 +126,50 @@ fun DashboardScreen(
                     Text("Gateway error", style = MaterialTheme.typography.titleSmall, color = Rose)
                     Spacer(Modifier.height(4.dp))
                     Text(lastError ?: "", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+                }
+            }
+        }
+        item {
+            val tunnelColor = when (tunnel.status) {
+                TunnelStatus.RUNNING -> Emerald
+                TunnelStatus.STARTING -> Amber
+                TunnelStatus.ERROR -> Rose
+                TunnelStatus.STOPPED -> TextMuted
+            }
+            val tunnelLabel = when (tunnel.status) {
+                TunnelStatus.RUNNING -> "Live"
+                TunnelStatus.STARTING -> "Connecting"
+                TunnelStatus.ERROR -> "Error"
+                TunnelStatus.STOPPED -> "Off"
+            }
+            AppCard(onClick = { onNavigate("tunnel") }) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        Modifier
+                            .size(34.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(tunnelColor.copy(alpha = 0.14f)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(Icons.Filled.Cloud, contentDescription = null, tint = tunnelColor, modifier = Modifier.size(18.dp))
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("Cloudflare Tunnel", style = MaterialTheme.typography.titleSmall, color = TextPrimary)
+                        Text(
+                            when {
+                                tunnel.status == TunnelStatus.RUNNING && tunnel.publicUrl.isNotBlank() -> tunnel.publicUrl
+                                tunnel.status == TunnelStatus.ERROR -> tunnel.message.ifBlank { "Connector error" }
+                                tunnel.status == TunnelStatus.RUNNING -> "Connected · hostname not set"
+                                else -> "Expose the gateway with a public URL"
+                            },
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            color = if (tunnel.status == TunnelStatus.RUNNING) Brand else TextMuted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    StatusPill(tunnelLabel, tunnelColor)
                 }
             }
         }

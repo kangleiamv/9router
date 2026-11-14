@@ -16,6 +16,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Article
 import androidx.compose.material.icons.filled.BarChart
+import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.DataUsage
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Home
@@ -69,6 +70,7 @@ import ai.ninerouter.ui.screens.ProvidersScreen
 import ai.ninerouter.ui.screens.QuotaScreen
 import ai.ninerouter.ui.screens.SettingsScreen
 import ai.ninerouter.ui.screens.TelegramScreen
+import ai.ninerouter.ui.screens.TunnelScreen
 import ai.ninerouter.ui.screens.UsageScreen
 import ai.ninerouter.ui.theme.AppBorder
 import ai.ninerouter.ui.theme.AppSurface
@@ -96,6 +98,7 @@ private val entries = listOf(
     DrawerEntry("keys", "Endpoint & Key", Icons.Filled.VpnKey, "Client credentials"),
     DrawerEntry("usage", "Usage", Icons.Filled.BarChart, "Request analytics"),
     DrawerEntry("quota", "Quota Tracker", Icons.Filled.DataUsage, "Live limits & cooldowns"),
+    DrawerEntry("tunnel", "Tunnel", Icons.Filled.Cloud, "Cloudflare public URL"),
     DrawerEntry("telegram", "Telegram Bot", Icons.Filled.Send, "Chat bridge"),
     DrawerEntry("logs", "Console Log", Icons.Filled.Article, "Request history"),
     DrawerEntry("settings", "Settings", Icons.Filled.Settings, "Gateway & storage")
@@ -285,6 +288,7 @@ fun NineRouterRoot(viewModel: MainViewModel) {
                 composable("keys") { KeysScreen(viewModel) }
                 composable("usage") { UsageScreen(viewModel) }
                 composable("quota") { QuotaScreen(viewModel) }
+                composable("tunnel") { TunnelScreen(viewModel) }
                 composable("telegram") { TelegramScreen(viewModel) }
                 composable("logs") { LogsScreen(viewModel) }
                 composable("settings") { SettingsScreen(viewModel) }

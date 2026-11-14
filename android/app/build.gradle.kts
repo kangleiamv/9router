@@ -13,8 +13,8 @@ android {
         applicationId = "ai.ninerouter"
         minSdk = 26
         targetSdk = 34
-        versionCode = 11
-        versionName = "1.3.6"
+        versionCode = 12
+        versionName = "1.3.7"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
@@ -44,6 +44,14 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
             excludes += "/META-INF/INDEX.LIST"
             excludes += "/META-INF/io.netty.versions.properties"
+        }
+        jniLibs {
+            // cloudflared ships as libcloudflared.so. It is a Termux Android/arm64
+            // PIE, so Android's loader can execute it from nativeLibraryDir.
+            // useLegacyPackaging keeps the library extracted; keepDebugSymbols
+            // stops AGP from stripping the Go binary.
+            useLegacyPackaging = true
+            keepDebugSymbols += "**/libcloudflared.so"
         }
     }
 }

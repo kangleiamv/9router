@@ -717,10 +717,7 @@ object UpstreamClient {
                 add(buildJsonObject {
                     put("name", fn.string("name") ?: return@forEach)
                     put("description", fn.string("description").orEmpty())
-                    put("parameters", fn["parameters"] ?: buildJsonObject {
-                        put("type", "object")
-                        put("properties", buildJsonObject { })
-                    })
+                    put("parameters", GeminiSchema.clean(fn["parameters"]))
                 })
             }
         }

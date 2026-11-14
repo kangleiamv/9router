@@ -1,0 +1,31 @@
+cloudflared 2026.11.0
+Copyright (c) Cloudflare, Inc.
+https://github.com/cloudflare/cloudflared
+
+Bundled as lib/arm64-v8a/libcloudflared.so and executed directly as a child
+process to provide Cloudflare Quick Tunnels and named tunnels.
+
+The binary is the Termux Android/arm64 build of cloudflared, taken from:
+  https://packages.termux.dev/apt/termux-main/pool/main/c/cloudflared/cloudflared_2026.11.0_aarch64.deb
+Termux package SHA-256:
+  60c9e66116f6239b01c1dc8b4a7337b6d0962f8e1b62da47e21b0aa58000416b
+Bundled binary SHA-256:
+  6294204649a9b1e7bf11e1945306a9261eae8847555683b3fca80a08a7e4ffb3
+
+The Termux build is an Android PIE (ELF ET_DYN) linked against Bionic's
+/system/bin/linker64, built with GOOS=android and CGO_ENABLED=1. Android can
+execute it from nativeLibraryDir, and its cgo resolver uses Android's DNS
+directly, so no hosts patch or launcher wrapper is needed. The binary is
+otherwise unmodified.
+
+Licensed under the Apache License, Version 2.0; the full text is in
+cloudflared-LICENSE.txt. The Termux package metadata and build scripts are
+available from https://github.com/termux/termux-packages.
+
+assets/cacert.pem
+Mozilla CA certificate bundle fetched from https://curl.se/ca/cacert.pem.
+Go's x509 loader does not read Android's hashed system CA store, so the app
+sets SSL_CERT_FILE to this extracted bundle. The bundle is distributed under
+the Mozilla Public License 2.0; see https://www.mozilla.org/MPL/2.0/.
+SHA-256:
+  427c064216761a1e72a8b30f0d954d08cb6e4435a82091fb865afd20c8497285

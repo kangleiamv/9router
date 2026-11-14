@@ -5,6 +5,8 @@ import ai.ninerouter.core.CompatibleProbe
 import ai.ninerouter.core.DashboardStats
 import ai.ninerouter.core.ProxyRuntime
 import ai.ninerouter.core.ProviderUsage
+import ai.ninerouter.core.TunnelRuntime
+import ai.ninerouter.core.TunnelState
 import ai.ninerouter.data.model.ApiKey
 import ai.ninerouter.data.model.Combo
 import ai.ninerouter.data.model.CustomProvider
@@ -19,6 +21,7 @@ import ai.ninerouter.engine.oauth.OAuthException
 import ai.ninerouter.engine.oauth.OAuthProviders
 import ai.ninerouter.engine.specificData
 import ai.ninerouter.service.ProxyForegroundService
+import ai.ninerouter.util.Crypto
 import android.app.Application
 import android.content.Intent
 import android.net.Uri
@@ -79,6 +82,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val running: StateFlow<Boolean> = ProxyRuntime.running
     val port: StateFlow<Int> = ProxyRuntime.port
     val lastError: StateFlow<String?> = ProxyRuntime.lastError
+    val tunnelState: StateFlow<TunnelState> = TunnelRuntime.state
 
     private val _busy = MutableStateFlow<Set<String>>(emptySet())
     val busy: StateFlow<Set<String>> = _busy.asStateFlow()
@@ -177,6 +181,54 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ProxyForegroundService.start(context)
             emit("Restarting local gateway…")
         }
+    }
+
+    /** Persist the tunnel configuration and let the foreground service own the process. */
+    fun startTunnel(mode: String, token: String, hostname: String) {
+        val context = getApplication<Application>()
+        viewModelScope.launch {
+            runCatching {
+                val normalizedMode = if (mode == "token") "token" else "quick"
+                val typedToken = token.trim()
+                val storedToken = repo.getSetting("tunnel_token").orEmpty()
+                if (normalizedMode == "token" && typedToken.isBlank() && storedToken.isBlank()) {
+                    throw IllegalArgumentException("Cloudflare tunnel token is required for a named tunnel")
+                }
+                repo.putSetting("tunnel_enabled", "true")
+                repo.putSetting("tunnel_mode", normalizedMode)
+                repo.putSetting("tunnel_hostname", hostname.trim())
+                if (typedToken.isNotBlank()) {
+                    repo.putSetting("tunnel_token", Crypto.encrypt(typedToken).orEmpty())
+                }
+                refreshSettings()
+            }.onFailure {
+                emit(it.message ?: "Could not start the Cloudflare tunnel", true)
+                return@launch
+            }
+            ProxyForegroundService.startTunnel(context)
+            emit("Cloudflare tunnel starting…")
+        }
+    }
+
+    fun stopTunnel() {
+        val context = getApplication<Application>()
+        viewModelScope.launch {
+            runCatching {
+                repo.putSetting("tunnel_enabled", "false")
+                refreshSettings()
+            }
+            ProxyForegroundService.stopTunnel(context)
+            emit("Cloudflare tunnel stopped")
+        }
+    }
+
+    fun retryTunnel() {
+        val current = _settings.value
+        startTunnel(
+            mode = current["tunnel_mode"] ?: "quick",
+            token = "",
+            hostname = current["tunnel_hostname"].orEmpty(),
+        )
     }
 
     fun saveSettingsAndRestart(values: Map<String, String>) {

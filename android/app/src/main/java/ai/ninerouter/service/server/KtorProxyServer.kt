@@ -59,8 +59,10 @@ import java.time.Instant
  */
 object KtorProxyServer {
     private var server: ApplicationEngine? = null
+    private var publicServer: ApplicationEngine? = null
 
     val isRunning: Boolean get() = server != null
+    val isPublicRunning: Boolean get() = publicServer != null
 
     @Synchronized
     fun start(port: Int, repo: AppRepository): Boolean {
@@ -84,6 +86,83 @@ object KtorProxyServer {
         runCatching { server?.stop(500, 1500) }
         server = null
         ProxyRuntime.markStopped()
+    }
+
+    /**
+     * Starts the restricted surface cloudflared is allowed to reach: only the
+     * OpenAI-compatible chat/models routes, never the management API. Binding
+     * to loopback keeps it invisible on the LAN; cloudflared connects locally.
+     */
+    @Synchronized
+    fun startPublicServer(port: Int, repo: AppRepository): Boolean {
+        if (publicServer != null) return true
+        return try {
+            val engine = embeddedServer(CIO, port = port, host = "127.0.0.1") {
+                publicModule(repo)
+            }.start(wait = false)
+            publicServer = engine
+            true
+        } catch (t: Throwable) {
+            publicServer = null
+            false
+        }
+    }
+
+    @Synchronized
+    fun stopPublicServer() {
+        runCatching { publicServer?.stop(300, 1000) }
+        publicServer = null
+    }
+
+    private fun Application.publicModule(repo: AppRepository) {
+        install(CORS) {
+            anyHost()
+            allowHeader(HttpHeaders.ContentType)
+            allowHeader(HttpHeaders.Authorization)
+            allowHeader("x-api-key")
+            allowMethod(HttpMethod.Get)
+            allowMethod(HttpMethod.Post)
+            allowMethod(HttpMethod.Options)
+        }
+        install(StatusPages) {
+            exception<Throwable> { call, cause ->
+                runCatching {
+                    call.respondText(
+                        errorJson(cause.message ?: "Internal server error", "server_error", "internal_error"),
+                        ContentType.Application.Json,
+                        HttpStatusCode.InternalServerError,
+                    )
+                }
+            }
+        }
+        routing {
+            get("/") {
+                call.respondText(
+                    buildJsonObject {
+                        put("name", "9Router Android public tunnel")
+                        put("status", "running")
+                        put("endpoint", "/v1")
+                        put("auth", "Bearer API key required for chat completions")
+                    }.toString(),
+                    ContentType.Application.Json,
+                )
+            }
+            get("/api/health") {
+                call.respondText(
+                    buildJsonObject { put("status", "ok") }.toString(),
+                    ContentType.Application.Json,
+                )
+            }
+            get("/v1/models") {
+                call.respondText(repo.engine.listModels(), ContentType.Application.Json)
+            }
+            get("/models") {
+                call.respondText(repo.engine.listModels(), ContentType.Application.Json)
+            }
+            post("/v1/chat/completions") { handleChat(call, repo) }
+            post("/api/v1/chat/completions") { handleChat(call, repo) }
+            post("/chat/completions") { handleChat(call, repo) }
+        }
     }
 
     private fun Application.module(repo: AppRepository) {

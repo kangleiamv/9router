@@ -111,7 +111,8 @@ fun KeysScreen(viewModel: MainViewModel) {
                     }
                 }
                 Text(
-                    "Bind address is loopback only. Forward with  adb forward tcp:20127 tcp:20127  to use it from a desktop client.",
+                    "Bind address is loopback only. Forward with  adb forward tcp:20127 tcp:20127  for a desktop client, " +
+                        "or open the Tunnel screen to publish /v1 through Cloudflare.",
                     style = MaterialTheme.typography.bodySmall,
                     color = TextMuted
                 )

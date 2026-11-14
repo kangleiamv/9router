@@ -126,7 +126,11 @@ class AppRepository(context: android.content.Context) {
             "telegram_default_model" to "",
             "telegram_combo" to "",
             "telegram_system_prompt" to "You are 9Router, a helpful assistant running on Android.",
-            "telegram_notifications" to "true"
+            "telegram_notifications" to "true",
+            "tunnel_enabled" to "false",
+            "tunnel_mode" to "quick",
+            "tunnel_hostname" to "",
+            "tunnel_token" to ""
         )
         val existing = settingDao.getAll().map { it.key }.toSet()
         defaults.forEach { (key, value) ->

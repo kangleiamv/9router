@@ -336,6 +336,10 @@ object ProviderCatalog {
         category = "oauth",
         color = "#4285F4",
         website = "https://github.com/google-gemini/gemini-cli",
+        // Start on the free-tier friendly Flash preview. The 3.1 Pro preview
+        // is not provisioned for every Code Assist account, so using it as the
+        // first connection default made a working sign-in look broken.
+        defaultModel = "gemini-3-flash-preview",
         models = listOf(
             m("gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview"),
             m("gemini-3-pro-preview", "Gemini 3 Pro Preview"),

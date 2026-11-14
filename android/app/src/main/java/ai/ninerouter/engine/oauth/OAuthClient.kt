@@ -53,8 +53,11 @@ class OAuthSession internal constructor(
                 ?: throw OAuthException("No authorization code received from ${provider.providerId}")
             val tokens = OAuthClient.exchange(provider, code, params["state"] ?: state, server.redirectUri, codeVerifier)
             val email = OAuthClient.fetchEmail(provider, tokens.accessToken)
+            // Project discovery must not abort sign-in. Some accounts need the
+            // Code Assist onboarding to finish later, and the web flow saves
+            // the connection without a project and repairs it on first use.
             val projectId = provider.codeAssist?.let { kind ->
-                OAuthClient.loadCodeAssist(provider, kind, tokens.accessToken)
+                OAuthClient.loadCodeAssist(kind, tokens.accessToken)
             }
             return tokens.copy(email = email, projectId = projectId)
         } finally {
@@ -204,23 +207,14 @@ object OAuthClient {
     }
 
     internal fun loadCodeAssist(
-        provider: OAuthProviderConfig,
         kind: CodeAssistKind,
         accessToken: String
-    ): String? {
-        val projectId = resolveProjectId(kind, accessToken)
-        if (projectId.isNullOrBlank()) {
-            throw OAuthException(
-                "No Google Cloud project found for this account. Enable Gemini Code Assist for the account and try again."
-            )
-        }
-        return projectId
-    }
+    ): String? = resolveProjectId(kind, accessToken)
 
     /**
-     * Resolves the Cloud project for a Code Assist OAuth account. Unlike
-     * [loadCodeAssist] this never throws: request-time repair uses it so a
-     * connection with a missing or stale project can recover on its own.
+     * Resolves the Cloud project for a Code Assist OAuth account. Unlike the
+     * old eager sign-in check this never throws: request-time repair uses it so
+     * a connection with a missing or stale project can recover on its own.
      */
     fun resolveProjectId(kind: CodeAssistKind, accessToken: String): String? {
         if (accessToken.isBlank()) return null
@@ -240,14 +234,36 @@ object OAuthClient {
             ?.trim()
             ?: "legacy-tier"
 
-        for (attempt in 0 until 4) {
-            val onboarded = runCatching { onboard(accessToken, tierId, metadata) }.getOrNull()
+        for (attempt in 0 until 5) {
+            val onboarded = runCatching {
+                onboard(kind, accessToken, tierId, metadata)
+            }.getOrNull()
             val finalProject = onboarded?.let { extractProjectId(it) }
             if (!finalProject.isNullOrBlank()) return finalProject
             if (onboarded?.boolean("done") == true) break
-            if (attempt < 3) runCatching { Thread.sleep(2_500) }
+            if (attempt < 4) runCatching { Thread.sleep(4_000) }
         }
         return null
+    }
+
+    /**
+     * Headers Google fingerprints during Code Assist project provisioning.
+     * Gemini CLI must look like the Google API client, while Antigravity must
+     * look like the Antigravity IDE; mixing them can silently prevent a
+     * `cloudaicompanionProject` from being provisioned.
+     */
+    internal fun codeAssistHeaders(
+        kind: CodeAssistKind,
+        metadata: JsonObject
+    ): Map<String, String> = when (kind) {
+        CodeAssistKind.ANTIGRAVITY -> mapOf(
+            "User-Agent" to "antigravity/hub/2.24.0 darwin/arm64"
+        )
+        CodeAssistKind.GEMINI_CLI -> mapOf(
+            "User-Agent" to "google-api-nodejs-client/9.15.1",
+            "X-Goog-Api-Client" to "google-cloud-sdk vscode_cloudshelleditor/0.1",
+            "Client-Metadata" to metadata.toString()
+        )
     }
 
     private fun loadCodeAssistJson(
@@ -264,12 +280,8 @@ object OAuthClient {
             .post(loadPayload.toString().toRequestBody(MEDIA_JSON))
             .header("Authorization", "Bearer $accessToken")
             .header("Content-Type", "application/json")
-        if (kind == CodeAssistKind.ANTIGRAVITY) {
-            loadBuilder.header("User-Agent", "antigravity/hub/2.24.0 darwin/arm64")
-        } else {
-            loadBuilder.header("User-Agent", "google-api-nodejs-client/9.15.1")
-            loadBuilder.header("X-Goog-Api-Client", "google-cloud-sdk vscode_cloudshelleditor/0.1")
-            loadBuilder.header("Client-Metadata", metadata.toString())
+        codeAssistHeaders(kind, metadata).forEach { (name, value) ->
+            loadBuilder.header(name, value)
         }
         return runCatching {
             http.newCall(loadBuilder.build()).execute().use { response ->
@@ -284,7 +296,12 @@ object OAuthClient {
         return if (arch.contains("aarch64") || arch.contains("arm64")) 4 else 3
     }
 
-    private fun onboard(accessToken: String, tierId: String, metadata: JsonObject): JsonObject? {
+    private fun onboard(
+        kind: CodeAssistKind,
+        accessToken: String,
+        tierId: String,
+        metadata: JsonObject
+    ): JsonObject? {
         val payload = buildJsonObject {
             put("tierId", tierId)
             put("metadata", metadata)
@@ -294,9 +311,10 @@ object OAuthClient {
             .post(payload.toString().toRequestBody(MEDIA_JSON))
             .header("Authorization", "Bearer $accessToken")
             .header("Content-Type", "application/json")
-            .header("User-Agent", "antigravity/hub/2.24.0 darwin/arm64")
-            .build()
-        return http.newCall(request).execute().use { response ->
+        codeAssistHeaders(kind, metadata).forEach { (name, value) ->
+            request.header(name, value)
+        }
+        return http.newCall(request.build()).execute().use { response ->
             if (!response.isSuccessful) return@use null
             val json = Json.lenient.parseToJsonElement(response.body?.string().orEmpty()).jsonObject
             // The final project id can arrive inside response.cloudaicompanionProject.
@@ -314,11 +332,11 @@ object OAuthClient {
         }
     }
 
-    private fun extractProjectId(json: JsonObject): String? {
+    internal fun extractProjectId(json: JsonObject): String? {
         val value = json["cloudaicompanionProject"] ?: json["projectId"] ?: return null
         return when (value) {
-            is JsonPrimitive -> value.contentOrNull?.takeIf { it.isNotBlank() }
-            is JsonObject -> value.string("id")
+            is JsonPrimitive -> value.contentOrNull?.trim()?.takeIf { it.isNotBlank() }
+            is JsonObject -> value.string("id")?.trim()?.takeIf { it.isNotBlank() }
             else -> null
         }
     }

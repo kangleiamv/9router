@@ -76,6 +76,13 @@ class UpstreamException(message: String) : Exception(message)
 object UpstreamClient {
     private val MEDIA_JSON = "application/json; charset=utf-8".toMediaType()
 
+    // Cloud Code Assist fingerprints the Gemini CLI client. Keep these values
+    // in sync with open-sse/providers/registry/gemini-cli.js. Sending the raw
+    // google-genai SDK as the User-Agent makes Google reject free-tier calls.
+    private const val GEMINI_CLI_VERSION = "0.34.0"
+    private const val GEMINI_CLI_API_CLIENT = "google-genai-sdk/1.41.0 gl-node/v22.19.0"
+    private const val GEMINI_CLI_PLATFORM = "linux"
+
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
@@ -166,7 +173,7 @@ object UpstreamClient {
             OAuthClient.resolveProjectId(kind, access)
         }
         if (resolved.isNullOrBlank()) {
-            projectLookupBlockedUntil[connection.id] = now + 5 * 60_000L
+            projectLookupBlockedUntil[connection.id] = now + 60_000L
             return null
         }
         projectLookupBlockedUntil.remove(connection.id)
@@ -201,7 +208,7 @@ object UpstreamClient {
             )
             WireFormat.ANTHROPIC -> anthropicRequest(spec, baseUrl, creds, upstreamModel, ctx)
             WireFormat.GEMINI -> geminiRequest(spec, baseUrl, creds, upstreamModel, ctx)
-            WireFormat.GEMINI_CLI -> geminiCliRequest(spec, baseUrl, creds, upstreamModel, ctx)
+            WireFormat.GEMINI_CLI -> geminiCliRequest(spec, baseUrl, creds, connection, upstreamModel, ctx)
             WireFormat.ANTIGRAVITY -> antigravityRequest(spec, baseUrl, creds, connection, upstreamModel, ctx)
         }
         fun execute(request: Request): Response =
@@ -214,11 +221,16 @@ object UpstreamClient {
         // surfacing a dead connection to the client. Google also returns this
         // 404 for a model that is not enabled for the account, so only retry
         // when the lookup produced a different project id.
-        if (spec.format == WireFormat.ANTIGRAVITY && isUnknownEntityResponse(response)) {
+        val repairKind = when (spec.format) {
+            WireFormat.ANTIGRAVITY -> ai.ninerouter.engine.oauth.CodeAssistKind.ANTIGRAVITY
+            WireFormat.GEMINI_CLI -> ai.ninerouter.engine.oauth.CodeAssistKind.GEMINI_CLI
+            else -> null
+        }
+        if (repairKind != null && isUnknownEntityResponse(response)) {
             val previous = creds["projectId"].orEmpty()
             val resolved = ensureProject(
                 connection,
-                ai.ninerouter.engine.oauth.CodeAssistKind.ANTIGRAVITY,
+                repairKind,
                 creds,
                 force = true
             )
@@ -489,29 +501,112 @@ object UpstreamClient {
         spec: ProviderSpec,
         baseUrl: String,
         creds: Map<String, String>,
+        connection: ProviderConnection,
         upstreamModel: String,
         ctx: ChatContext
     ): Request {
-        val project = creds["projectId"].orEmpty()
-        if (project.isBlank()) {
-            throw UpstreamException("Gemini CLI connection has no Cloud project. Reconnect the account in Providers.")
-        }
+        // The web transport falls back to a generated project id when Google
+        // has not provisioned one yet; a 404 from that id triggers the
+        // project-repair retry below. Throwing here would prevent recovery.
+        val project = creds["projectId"].orEmpty().ifBlank { Ids.generatedProjectId() }
         val action = if (ctx.stream) ":streamGenerateContent?alt=sse" else ":generateContent"
-        val payload = buildJsonObject {
-            put("project", project)
-            put("model", upstreamModel)
-            put("request", geminiPayload(ctx))
-        }
+        val payload = geminiCliEnvelope(
+            project = project,
+            model = upstreamModel,
+            sessionId = creds["sessionId"]?.takeIf { it.isNotBlank() } ?: connection.id,
+            ctx = ctx
+        )
         val builder = Request.Builder()
             .url(baseUrl + action)
             .post(payload.toString().toRequestBody(MEDIA_JSON))
-            .header("Content-Type", "application/json")
-            .header("Authorization", "Bearer ${creds["accessToken"].orEmpty()}")
-            .header("User-Agent", "google-genai-sdk/1.41.0 gl-node/v22.19.0")
-            .header("X-Goog-Api-Client", "gl-node/22.19.0")
-            .header("Accept", if (ctx.stream) "text/event-stream" else "application/json")
+        geminiCliHeaders(
+            model = upstreamModel,
+            accessToken = creds["accessToken"].orEmpty(),
+            stream = ctx.stream
+        ).forEach { (name, value) -> builder.header(name, value) }
         return builder.build()
     }
+
+    /**
+     * Cloud Code wraps the Gemini payload. Mirror the reference envelope,
+     * including the CLI identity, request/session ids, safety settings and
+     * validated tool config; Google uses several of these for free-tier
+     * routing and rejects incomplete envelopes on some accounts.
+     */
+    internal fun geminiCliEnvelope(
+        project: String,
+        model: String,
+        sessionId: String,
+        ctx: ChatContext
+    ): JsonObject {
+        val inner = buildJsonObject {
+            geminiPayload(ctx).forEach { (key, value) -> put(key, value) }
+            put("sessionId", sessionId)
+            putJsonArray("safetySettings") {
+                listOf(
+                    "HARM_CATEGORY_HATE_SPEECH",
+                    "HARM_CATEGORY_DANGEROUS_CONTENT",
+                    "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                    "HARM_CATEGORY_HARASSMENT",
+                    "HARM_CATEGORY_CIVIC_INTEGRITY"
+                ).forEach { category ->
+                    add(buildJsonObject {
+                        put("category", category)
+                        put("threshold", "OFF")
+                    })
+                }
+            }
+            val tools = ctx.raw["tools"] as? JsonArray
+            if (!tools.isNullOrEmpty()) {
+                putJsonObject("toolConfig") {
+                    putJsonObject("functionCallingConfig") {
+                        put("mode", "VALIDATED")
+                    }
+                }
+            }
+        }
+        return buildJsonObject {
+            put("project", project)
+            put("model", model)
+            put("userAgent", "gemini-cli")
+            put("requestId", Ids.agentRequestId())
+            put("request", inner)
+        }
+    }
+
+    /**
+     * Headers required by the Cloud Code Assist Gemini CLI endpoint. The
+     * `GeminiCLI/<version>/<model>` User-Agent is part of the free-tier
+     * fingerprint; the generic google-genai SDK value is not accepted for
+     * every account.
+     */
+    internal fun geminiCliHeaders(
+        model: String,
+        accessToken: String,
+        stream: Boolean
+    ): Map<String, String> = mapOf(
+        "Content-Type" to "application/json",
+        "Authorization" to "Bearer $accessToken",
+        "User-Agent" to geminiCliUserAgent(model),
+        "X-Goog-Api-Client" to GEMINI_CLI_API_CLIENT,
+        "Accept" to if (stream) "text/event-stream" else "application/json"
+    )
+
+    internal fun geminiCliUserAgent(
+        model: String,
+        platform: String = GEMINI_CLI_PLATFORM,
+        arch: String = geminiCliArch()
+    ): String = "GeminiCLI/$GEMINI_CLI_VERSION/${model.ifBlank { "unknown" }} " +
+        "($platform; $arch; terminal)"
+
+    internal fun geminiCliArch(raw: String = System.getProperty("os.arch").orEmpty()): String =
+        when (raw.lowercase()) {
+            "aarch64", "arm64" -> "arm64"
+            "arm", "armv7l", "armv8l" -> "arm"
+            "x86_64", "amd64" -> "x64"
+            "i386", "i686", "x86" -> "x86"
+            else -> raw.ifBlank { "unknown" }
+        }
 
     private fun geminiPayload(ctx: ChatContext): JsonObject {
         val system = StringBuilder()
@@ -536,6 +631,7 @@ object UpstreamClient {
             put("role", "user")
             put("parts", buildJsonArray { add(buildJsonObject { put("text", "Continue.") }) })
         }
+        val tools = geminiTools(ctx.raw["tools"])
         return buildJsonObject {
             put("contents", JsonArray(contents))
             if (system.isNotEmpty()) putJsonObject("systemInstruction") {
@@ -547,7 +643,7 @@ object UpstreamClient {
                 (ctx.raw.int("max_tokens") ?: ctx.raw.int("max_completion_tokens"))?.let { put("maxOutputTokens", it) }
                 ctx.raw.string("stop")?.let { putJsonArray("stopSequences") { add(JsonPrimitive(it)) } }
             }
-            put("tools", geminiTools(ctx.raw["tools"]))
+            if (tools.isNotEmpty()) put("tools", tools)
         }
     }
 

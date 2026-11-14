@@ -65,10 +65,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.4>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.5>.
 
 ```bash
-adb install -r 9router-android-1.3.4-debug.apk
+adb install -r 9router-android-1.3.5-debug.apk
 ```
 
 Or download the artifact and open it on the device (allow install from unknown
@@ -81,7 +81,9 @@ sources for the file manager you use).
    provider's consent page and the app catches the loopback callback on
    `http://localhost:<port>/callback`. For any other provider paste an API key.
    Manual tokens (access token, or advanced JSON with `refreshToken` and
-   `projectId`) still work as a fallback.
+   `projectId`) still work as a fallback. Gemini CLI signs in even when Google
+   has not provisioned a Code Assist project yet; the app resolves it on first
+   use and retries onboarding when needed.
 2. Optionally create a combo in **Combo & Vision** — members are tried in order.
 3. The gateway starts automatically. Copy the base URL and an API key from
    **Endpoint & Key**.

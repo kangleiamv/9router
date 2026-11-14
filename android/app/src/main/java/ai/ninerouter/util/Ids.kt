@@ -19,6 +19,9 @@ object Ids {
 
     fun requestId(): String = "chatcmpl-" + UUID.randomUUID().toString().replace("-", "").take(24)
 
+    /** Request id shape used by the Gemini CLI Cloud Code envelope. */
+    fun agentRequestId(): String = "agent-" + UUID.randomUUID().toString()
+
     /**
      * Antigravity expects a managed project id in its envelope. When Google has
      * not provisioned one (or the lookup is temporarily unavailable) the web

@@ -613,10 +613,12 @@ class AppRepository(context: android.content.Context) {
                 ?: "default"
             var result = UpstreamClient.testConnection(spec, current, model)
             var repairedModel: String? = null
-            // Antigravity uses the same 404 for a model that is in the catalog
-            // but not enabled for the account. Verify the credential on the
-            // provider's known-good model before declaring the connection broken.
-            if (!result.first && spec.format == WireFormat.ANTIGRAVITY &&
+            // Antigravity and Gemini CLI use the same 404 for a model that is
+            // in the catalog but not enabled for the account. Verify the
+            // credential on the provider's known-good model before declaring
+            // the connection broken.
+            if (!result.first &&
+                (spec.format == WireFormat.ANTIGRAVITY || spec.format == WireFormat.GEMINI_CLI) &&
                 UpstreamClient.isUnknownEntityMessage(result.second)
             ) {
                 val fallback = spec.defaultModel

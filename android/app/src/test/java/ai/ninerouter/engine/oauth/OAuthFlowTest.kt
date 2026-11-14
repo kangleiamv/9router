@@ -1,7 +1,12 @@
 package ai.ninerouter.engine.oauth
 
+import ai.ninerouter.util.Json
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.net.HttpURLConnection
@@ -56,5 +61,49 @@ class OAuthFlowTest {
             pool.shutdownNow()
             server.close()
         }
+    }
+
+    @Test
+    fun `extracts gemini cli project from string and object responses`() {
+        val stringProject = Json.lenient.parseToJsonElement(
+            """{"cloudaicompanionProject":"  my-project-123  "}"""
+        ).jsonObject
+        val objectProject = Json.lenient.parseToJsonElement(
+            """{"cloudaicompanionProject":{"id":"object-project"}}"""
+        ).jsonObject
+        val directProject = Json.lenient.parseToJsonElement(
+            """{"projectId":"direct-project"}"""
+        ).jsonObject
+
+        assertEquals("my-project-123", OAuthClient.extractProjectId(stringProject))
+        assertEquals("object-project", OAuthClient.extractProjectId(objectProject))
+        assertEquals("direct-project", OAuthClient.extractProjectId(directProject))
+        assertNull(OAuthClient.extractProjectId(buildJsonObject { }))
+        assertNull(
+            OAuthClient.extractProjectId(
+                Json.lenient.parseToJsonElement("""{"cloudaicompanionProject":"   "}""").jsonObject
+            )
+        )
+    }
+
+    @Test
+    fun `gemini cli project provisioning uses the google api client fingerprint`() {
+        val metadata = buildJsonObject {
+            put("ideType", 9)
+            put("platform", 4)
+            put("pluginType", 2)
+        }
+
+        val gemini = OAuthClient.codeAssistHeaders(CodeAssistKind.GEMINI_CLI, metadata)
+        val antigravity = OAuthClient.codeAssistHeaders(CodeAssistKind.ANTIGRAVITY, metadata)
+
+        assertEquals("google-api-nodejs-client/9.15.1", gemini["User-Agent"])
+        assertEquals(
+            "google-cloud-sdk vscode_cloudshelleditor/0.1",
+            gemini["X-Goog-Api-Client"]
+        )
+        assertEquals(metadata.toString(), gemini["Client-Metadata"])
+        assertEquals("antigravity/hub/2.24.0 darwin/arm64", antigravity["User-Agent"])
+        assertNull(antigravity["X-Goog-Api-Client"])
     }
 }

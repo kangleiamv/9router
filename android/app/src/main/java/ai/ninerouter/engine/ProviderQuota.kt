@@ -256,16 +256,12 @@ object ProviderQuotaClient {
         if (token.isBlank()) return message("Reconnect Gemini CLI to see quota.")
         val project = credentials["projectId"]
         if (project.isNullOrBlank()) {
-            return message("Gemini CLI project is missing. Reconnect the account to load quota.")
+            return message("Gemini CLI project is missing. Tap Test on the connection to retry Code Assist setup.")
         }
         val data = postJson(
             "$CLOUD_CODE_BASE/v1internal:retrieveUserQuota",
             buildJsonObject { put("project", project) },
-            mapOf(
-                "Authorization" to "Bearer $token",
-                "User-Agent" to "google-api-nodejs-client/9.15.1",
-                "X-Goog-Api-Client" to "google-cloud-sdk vscode_cloudshelleditor/0.1"
-            )
+            mapOf("Authorization" to "Bearer $token")
         )
         val windows = data.arr("buckets").orEmpty().mapNotNull { raw ->
             val bucket = raw as? JsonObject ?: return@mapNotNull null

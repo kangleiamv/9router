@@ -1,6 +1,12 @@
 package ai.ninerouter.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,6 +21,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -24,10 +31,11 @@ import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -36,25 +44,28 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import ai.ninerouter.core.ProviderUsage
 import ai.ninerouter.data.model.RequestDetail
-import ai.ninerouter.engine.ProviderCatalog
 import ai.ninerouter.ui.MainViewModel
 import ai.ninerouter.ui.components.AnimatedBar
 import ai.ninerouter.ui.components.AnimatedBarChart
 import ai.ninerouter.ui.components.AppCard
-import ai.ninerouter.ui.components.AppTextField
 import ai.ninerouter.ui.components.EmptyState
+import ai.ninerouter.ui.components.GhostButton
 import ai.ninerouter.ui.components.HairLine
-import ai.ninerouter.ui.components.RequestRow
+import ai.ninerouter.ui.components.RequestDayHeader
+import ai.ninerouter.ui.components.RequestFilterPill
+import ai.ninerouter.ui.components.RequestLogRow
 import ai.ninerouter.ui.components.SectionHeader
 import ai.ninerouter.ui.components.StatTile
 import ai.ninerouter.ui.components.formatClock
@@ -67,6 +78,7 @@ import ai.ninerouter.ui.components.statusLabel
 import ai.ninerouter.ui.theme.Amber
 import ai.ninerouter.ui.theme.AppBorder
 import ai.ninerouter.ui.theme.AppSurface
+import ai.ninerouter.ui.theme.AppSurfaceHigh
 import ai.ninerouter.ui.theme.Brand
 import ai.ninerouter.ui.theme.Emerald
 import ai.ninerouter.ui.theme.Rose
@@ -79,17 +91,22 @@ import java.time.ZoneId
 import java.time.format.TextStyle
 import java.util.Locale
 
-private enum class UsageFilter { ALL, SUCCESS, ERRORS }
+private enum class UsageTab(val label: String) { OVERVIEW("Overview"), LOG("Request log") }
+
+private enum class UsageFilter(val label: String) { ALL("All"), SUCCESS("OK"), ERRORS("Errors") }
 
 @Composable
 fun UsageScreen(viewModel: MainViewModel) {
     val stats by viewModel.stats.collectAsState()
     val usage by viewModel.providerUsage.collectAsState()
     val requests by viewModel.requests.collectAsState()
+    var tabIndex by rememberSaveable { mutableStateOf(0) }
     var filter by remember { mutableStateOf(UsageFilter.ALL) }
     var query by remember { mutableStateOf("") }
-    var logLimit by remember { mutableStateOf(LOG_PAGE_SIZE) }
+    var searchOpen by rememberSaveable { mutableStateOf(false) }
+    var logLimit by rememberSaveable { mutableStateOf(LOG_PAGE_SIZE) }
     var selected by remember { mutableStateOf<RequestDetail?>(null) }
+    val tab = if (tabIndex == 0) UsageTab.OVERVIEW else UsageTab.LOG
 
     LaunchedEffect(filter, query) { logLimit = LOG_PAGE_SIZE }
 
@@ -113,17 +130,150 @@ fun UsageScreen(viewModel: MainViewModel) {
     val successCount = requests.count { (it.status ?: 0) in 200..299 }
     val errorCount = requests.count { (it.status ?: 0) >= 400 }
 
-    LazyColumn(
-        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-        contentPadding = PaddingValues(top = 14.dp, bottom = 28.dp)
+    Column(
+        Modifier
+            .fillMaxSize()
+            .padding(horizontal = 16.dp)
     ) {
-        item {
-            SectionHeader(
-                title = "Usage",
-                subtitle = "Request analytics from the on-device database"
+        Spacer(Modifier.height(14.dp))
+        SectionHeader(
+            title = "Usage",
+            subtitle = "Request analytics from the on-device database"
+        )
+        Spacer(Modifier.height(12.dp))
+        UsageTabSwitcher(
+            selected = tab,
+            requestCount = requests.size,
+            onSelect = { selectedTab -> tabIndex = selectedTab.ordinal }
+        )
+        when (tab) {
+            UsageTab.OVERVIEW -> OverviewContent(
+                stats = stats,
+                usage = usage,
+                requests = requests,
+                errorCount = errorCount,
+                modifier = Modifier.weight(1f)
+            )
+
+            UsageTab.LOG -> RequestLogContent(
+                requests = requests,
+                filtered = filtered,
+                filter = filter,
+                query = query,
+                searchOpen = searchOpen,
+                logLimit = logLimit,
+                successCount = successCount,
+                errorCount = errorCount,
+                onFilterChange = { filter = it },
+                onQueryChange = { query = it },
+                onToggleSearch = {
+                    if (searchOpen || query.isNotBlank()) {
+                        searchOpen = false
+                        query = ""
+                    } else {
+                        searchOpen = true
+                    }
+                },
+                onLoadMore = { logLimit += LOG_PAGE_SIZE },
+                onSelect = { selected = it },
+                modifier = Modifier.weight(1f)
             )
         }
+    }
+
+    selected?.let { detail ->
+        RequestDetailDialog(detail = detail, onDismiss = { selected = null })
+    }
+}
+
+private const val LOG_PAGE_SIZE = 40
+
+@Composable
+private fun UsageTabSwitcher(
+    selected: UsageTab,
+    requestCount: Int,
+    onSelect: (UsageTab) -> Unit
+) {
+    val shape = RoundedCornerShape(13.dp)
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(AppSurface)
+            .border(1.dp, AppBorder, shape)
+            .padding(4.dp)
+    ) {
+        UsageTabButton(
+            label = UsageTab.OVERVIEW.label,
+            selected = selected == UsageTab.OVERVIEW,
+            onClick = { onSelect(UsageTab.OVERVIEW) },
+            modifier = Modifier.weight(1f)
+        )
+        UsageTabButton(
+            label = UsageTab.LOG.label,
+            selected = selected == UsageTab.LOG,
+            count = requestCount,
+            onClick = { onSelect(UsageTab.LOG) },
+            modifier = Modifier.weight(1f)
+        )
+    }
+}
+
+@Composable
+private fun UsageTabButton(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    count: Int? = null
+) {
+    Box(
+        modifier
+            .height(38.dp)
+            .clip(RoundedCornerShape(9.dp))
+            .background(if (selected) Brand else Color.Transparent)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelLarge,
+                color = if (selected) Color.White else TextSecondary,
+                maxLines = 1
+            )
+            if (count != null) {
+                Spacer(Modifier.width(6.dp))
+                Box(
+                    Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(if (selected) Color.White.copy(alpha = 0.20f) else AppSurfaceHigh)
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Text(
+                        formatCount(count),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (selected) Color.White else TextMuted
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun OverviewContent(
+    stats: ai.ninerouter.core.DashboardStats,
+    usage: List<ProviderUsage>,
+    requests: List<RequestDetail>,
+    errorCount: Int,
+    modifier: Modifier = Modifier
+) {
+    LazyColumn(
+        modifier = modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(top = 12.dp, bottom = 28.dp)
+    ) {
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 StatTile(
@@ -202,132 +352,205 @@ fun UsageScreen(viewModel: MainViewModel) {
                 StatusMix(requests)
             }
         }
-        item {
-            Row(
-                Modifier.fillMaxWidth().padding(top = 6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    "Request log",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = TextPrimary,
-                    modifier = Modifier.weight(1f)
-                )
-                Text(
-                    "${filtered.size} shown",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = TextMuted
-                )
-            }
-        }
-        item {
-            AppCard(padding = 0.dp) {
-                Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        UsageChip("All ${requests.size}", filter == UsageFilter.ALL) { filter = UsageFilter.ALL }
-                        UsageChip("OK $successCount", filter == UsageFilter.SUCCESS) { filter = UsageFilter.SUCCESS }
-                        UsageChip("Errors $errorCount", filter == UsageFilter.ERRORS) { filter = UsageFilter.ERRORS }
-                    }
-                    Spacer(Modifier.height(10.dp))
-                    AppTextField(
-                        value = query,
-                        onValueChange = { query = it },
-                        label = "Search",
-                        placeholder = "Model, provider, connection or error",
-                        trailingIcon = {
-                            if (query.isBlank()) {
-                                Icon(
-                                    Icons.Filled.Search,
-                                    contentDescription = null,
-                                    tint = TextMuted,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            } else {
-                                Icon(
-                                    Icons.Filled.Close,
-                                    contentDescription = "Clear search",
-                                    tint = TextMuted,
-                                    modifier = Modifier
-                                        .size(18.dp)
-                                        .clickable { query = "" }
-                                )
-                            }
-                        }
-                    )
-                }
-                HairLine()
-                if (filtered.isEmpty()) {
-                    EmptyState(
-                        icon = Icons.AutoMirrored.Filled.Article,
-                        title = if (requests.isEmpty()) "Nothing here yet" else "No matching requests",
-                        body = if (requests.isEmpty()) {
-                            "Requests appear after the gateway handles traffic. Try the quick test in Endpoint & Key."
-                        } else {
-                            "Adjust the status filter or clear the search query."
-                        }
-                    )
-                } else {
-                    filtered.take(logLimit).forEachIndexed { index, detail ->
-                        if (index > 0) HairLine(Modifier.padding(horizontal = 14.dp))
-                        Column(
-                            Modifier
-                                .fillMaxWidth()
-                                .clickable { selected = detail }
-                                .padding(horizontal = 14.dp)
-                        ) {
-                            RequestRow(detail)
-                        }
-                    }
-                    if (filtered.size > logLimit) {
-                        HairLine()
-                        Row(
-                            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                "Showing ${minOf(logLimit, filtered.size)} of ${filtered.size}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = TextMuted,
-                                modifier = Modifier.weight(1f)
-                            )
-                            TextButton(
-                                onClick = { logLimit += LOG_PAGE_SIZE }
-                            ) {
-                                Text(
-                                    "Show ${minOf(LOG_PAGE_SIZE, filtered.size - logLimit)} more",
-                                    color = Brand
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    selected?.let { detail ->
-        RequestDetailDialog(detail = detail, onDismiss = { selected = null })
     }
 }
 
-private const val LOG_PAGE_SIZE = 40
+@Composable
+private fun RequestLogContent(
+    requests: List<RequestDetail>,
+    filtered: List<RequestDetail>,
+    filter: UsageFilter,
+    query: String,
+    searchOpen: Boolean,
+    logLimit: Int,
+    successCount: Int,
+    errorCount: Int,
+    onFilterChange: (UsageFilter) -> Unit,
+    onQueryChange: (String) -> Unit,
+    onToggleSearch: () -> Unit,
+    onLoadMore: () -> Unit,
+    onSelect: (RequestDetail) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val zone = remember { ZoneId.systemDefault() }
+    val dayStats = remember(filtered, zone) {
+        filtered.groupBy { Instant.ofEpochMilli(it.timestamp).atZone(zone).toLocalDate() }
+            .mapValues { (_, rows) -> rows.size to rows.count { (it.status ?: 0) >= 400 } }
+    }
+    val searchVisible = searchOpen || query.isNotBlank()
+
+    Column(modifier.fillMaxWidth()) {
+        Spacer(Modifier.height(12.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    if (query.isBlank()) "Latest requests" else "Search results",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = TextPrimary
+                )
+                Text(
+                    when {
+                        filtered.isEmpty() -> "No matching traffic"
+                        filtered.size == requests.size -> "Tap a row to inspect the payload"
+                        else -> "${filtered.size} of ${requests.size} requests"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextMuted
+                )
+            }
+            IconButton(
+                onClick = onToggleSearch,
+                modifier = Modifier
+                    .size(38.dp)
+                    .clip(CircleShape)
+                    .background(if (searchVisible) Brand.copy(alpha = 0.16f) else AppSurfaceHigh)
+            ) {
+                Icon(
+                    if (searchVisible) Icons.Filled.Close else Icons.Filled.Search,
+                    contentDescription = if (searchVisible) "Close search" else "Search requests",
+                    tint = if (searchVisible) Brand else TextSecondary,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
+        Spacer(Modifier.height(9.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            RequestFilterPill(
+                label = "All",
+                count = requests.size,
+                selected = filter == UsageFilter.ALL,
+                accent = Brand,
+                onClick = { onFilterChange(UsageFilter.ALL) },
+                modifier = Modifier.weight(1f)
+            )
+            RequestFilterPill(
+                label = "OK",
+                count = successCount,
+                selected = filter == UsageFilter.SUCCESS,
+                accent = Emerald,
+                onClick = { onFilterChange(UsageFilter.SUCCESS) },
+                modifier = Modifier.weight(1f)
+            )
+            RequestFilterPill(
+                label = "Errors",
+                count = errorCount,
+                selected = filter == UsageFilter.ERRORS,
+                accent = Rose,
+                onClick = { onFilterChange(UsageFilter.ERRORS) },
+                modifier = Modifier.weight(1f)
+            )
+        }
+        AnimatedVisibility(
+            visible = searchVisible,
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically()
+        ) {
+            Column {
+                Spacer(Modifier.height(9.dp))
+                RequestSearchField(
+                    query = query,
+                    onQueryChange = onQueryChange
+                )
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        if (filtered.isEmpty()) {
+            EmptyState(
+                icon = Icons.AutoMirrored.Filled.Article,
+                title = if (requests.isEmpty()) "Nothing here yet" else "No matching requests",
+                body = if (requests.isEmpty()) {
+                    "Requests appear after the gateway handles traffic. Try the quick test in Endpoint & Key."
+                } else {
+                    "Adjust the status filter or clear the search query."
+                }
+            )
+        } else {
+            val visible = filtered.take(logLimit)
+            LazyColumn(
+                Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = PaddingValues(bottom = 24.dp)
+            ) {
+                itemsIndexed(visible, key = { _, detail -> detail.id }) { index, detail ->
+                    val day = Instant.ofEpochMilli(detail.timestamp).atZone(zone).toLocalDate()
+                    val previousDay = visible.getOrNull(index - 1)
+                        ?.let { Instant.ofEpochMilli(it.timestamp).atZone(zone).toLocalDate() }
+                    if (index == 0 || day != previousDay) {
+                        val stats = dayStats[day] ?: (0 to 0)
+                        RequestDayHeader(day = day, total = stats.first, errors = stats.second)
+                    }
+                    RequestLogRow(detail = detail, onClick = { onSelect(detail) })
+                }
+                if (filtered.size > logLimit) {
+                    item {
+                        Spacer(Modifier.height(10.dp))
+                        GhostButton(
+                            text = "Load ${minOf(LOG_PAGE_SIZE, filtered.size - logLimit)} more",
+                            onClick = onLoadMore,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Text(
+                            "${filtered.size - logLimit} remaining",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextMuted,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 6.dp),
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
 
 @Composable
-private fun UsageChip(label: String, selected: Boolean, onClick: () -> Unit) {
-    FilterChip(
-        selected = selected,
-        onClick = onClick,
-        label = { Text(label) },
-        colors = FilterChipDefaults.filterChipColors(
-            selectedContainerColor = Brand.copy(alpha = 0.18f),
-            selectedLabelColor = Brand,
-            labelColor = TextSecondary
-        ),
-        border = FilterChipDefaults.filterChipBorder(
-            enabled = true,
-            selected = selected,
-            borderColor = AppBorder,
-            selectedBorderColor = Brand.copy(alpha = 0.5f)
+private fun RequestSearchField(query: String, onQueryChange: (String) -> Unit) {
+    OutlinedTextField(
+        value = query,
+        onValueChange = onQueryChange,
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = true,
+        placeholder = {
+            Text(
+                "Search model, provider, connection or error",
+                style = MaterialTheme.typography.bodySmall,
+                color = TextMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        },
+        leadingIcon = {
+            Icon(
+                Icons.Filled.Search,
+                contentDescription = null,
+                tint = TextMuted,
+                modifier = Modifier.size(18.dp)
+            )
+        },
+        trailingIcon = {
+            if (query.isNotBlank()) {
+                Icon(
+                    Icons.Filled.Close,
+                    contentDescription = "Clear search",
+                    tint = TextMuted,
+                    modifier = Modifier
+                        .size(18.dp)
+                        .clickable { onQueryChange("") }
+                )
+            }
+        },
+        shape = RoundedCornerShape(12.dp),
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedTextColor = TextPrimary,
+            unfocusedTextColor = TextPrimary,
+            cursorColor = Brand,
+            focusedBorderColor = Brand,
+            unfocusedBorderColor = AppBorder,
+            focusedContainerColor = AppSurface,
+            unfocusedContainerColor = AppSurface,
+            focusedPlaceholderColor = TextMuted,
+            unfocusedPlaceholderColor = TextMuted
         )
     )
 }
@@ -452,13 +675,18 @@ private fun StatusMix(requests: List<RequestDetail>) {
     HairLine()
     Spacer(Modifier.height(9.dp))
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text("Average latency", style = MaterialTheme.typography.bodySmall, color = TextMuted, modifier = Modifier.weight(1f))
+        Text(
+            "Average latency",
+            style = MaterialTheme.typography.bodySmall,
+            color = TextMuted,
+            modifier = Modifier.weight(1f)
+        )
         Text(formatLatency(avg.takeIf { it > 0 }), style = MaterialTheme.typography.titleSmall, color = TextPrimary)
     }
 }
 
 @Composable
-private fun StatusBar(label: String, count: Int, total: Int, color: androidx.compose.ui.graphics.Color) {
+private fun StatusBar(label: String, count: Int, total: Int, color: Color) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(label, style = MaterialTheme.typography.bodySmall, color = TextPrimary, modifier = Modifier.weight(1f))
         Text(
@@ -512,7 +740,8 @@ private fun RequestDetailDialog(detail: RequestDetail, onDismiss: () -> Unit) {
                     }
                     Spacer(Modifier.width(8.dp))
                     Text(
-                        "${formatLatency(detail.latencyMs)} · ${formatCount((detail.promptTokens ?: 0) + (detail.completionTokens ?: 0))} tokens",
+                        "${formatLatency(detail.latencyMs)} · " +
+                            "${formatCount((detail.promptTokens ?: 0) + (detail.completionTokens ?: 0))} tokens",
                         style = MaterialTheme.typography.bodySmall,
                         color = TextSecondary
                     )
@@ -542,7 +771,10 @@ private fun RequestDetailDialog(detail: RequestDetail, onDismiss: () -> Unit) {
                     Spacer(Modifier.height(4.dp))
                     Text(
                         detail.requestBody.take(3500),
-                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, fontSize = 10.5.sp),
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.5.sp
+                        ),
                         color = TextSecondary
                     )
                 }
@@ -554,7 +786,10 @@ private fun RequestDetailDialog(detail: RequestDetail, onDismiss: () -> Unit) {
                     Spacer(Modifier.height(4.dp))
                     Text(
                         detail.responseBody.take(3500),
-                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, fontSize = 10.5.sp),
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.5.sp
+                        ),
                         color = TextSecondary
                     )
                 }

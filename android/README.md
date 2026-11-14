@@ -27,10 +27,10 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 - **Providers** — searchable directory with logos, connections, priority order, test, live model fetch, edit, pause, delete, plus OpenAI/Anthropic compatible custom endpoints
 - **Combo & Vision** — ordered fallback chains and the vision adapter
 - **Endpoint & Key** — client credentials plus a copy-paste `curl` test
-- **Usage** — animated 7-day/hourly charts, provider and status breakdowns, searchable unified request log
+- **Usage** — animated 7-day/hourly charts, provider and status breakdowns, and a dedicated Overview / Request log switcher with a day-grouped, filterable request feed
 - **Quota Tracker** — live provider limits (Antigravity, Gemini CLI, Claude, DeepSeek, Groq, GLM, OpenCode, Vercel AI Gateway, Ollama Cloud, MiniMax), animated gauges, reset countdowns, local usage fallback, and cooldown/model-lock tracking
 - **Telegram Bot** — bot token, owner chat id, routing, notifications, commands
-- **Console Log** — searchable request history with request/response payloads
+- **Console Log** — live day-grouped request inspector with status filters, collapsible search, expandable request/response payloads and one-tap copy
 - **Settings** — port, auto-start, retention, storage, runtime info
 
 ## Build
@@ -65,10 +65,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.1>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.2>.
 
 ```bash
-adb install -r 9router-android-1.3.1-debug.apk
+adb install -r 9router-android-1.3.2-debug.apk
 ```
 
 Or download the artifact and open it on the device (allow install from unknown

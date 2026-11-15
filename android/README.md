@@ -18,7 +18,7 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 | OAuth | Browser sign-in for Antigravity, Gemini CLI and Claude Code with a one-shot loopback callback, PKCE for Claude, automatic token refresh |
 | Routing | Combos, vision combo, per-account fallback, exponential backoff, model locks |
 | Telegram | Bot API long polling inside the foreground service, `/help` `/model` `/combo` `/vision` `/status` `/quota` `/clear` |
-| Cloudflare Tunnel | Optional public `/v1` endpoint via a bundled native `cloudflared` connector: quick `trycloudflare.com` URLs or named Zero Trust tunnels |
+| Cloudflare Tunnel | Optional public endpoint via a bundled native `cloudflared` connector: quick `trycloudflare.com` URLs or named Zero Trust tunnels, plus local links that publish other loopback apps through the same tunnel |
 | UI | Compose Material 3, Obsidian dark theme, drawer navigation |
 | Background | Foreground service + boot receiver (auto-start optional) |
 
@@ -31,7 +31,7 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 - **Usage** — animated 7-day/hourly charts, provider and status breakdowns, and a dedicated Overview / Request log switcher with a day-grouped, filterable request feed
 - **Quota Tracker** — live provider limits (Antigravity, Gemini CLI, Claude, DeepSeek, Groq, GLM, OpenCode, Vercel AI Gateway, Ollama Cloud, MiniMax), animated gauges, reset countdowns, local usage fallback, and cooldown/model-lock tracking
 - **Telegram Bot** — bot token, owner chat id, routing, notifications, commands
-- **Cloudflare Tunnel** — quick or named tunnel, public URL with copy/open/retry, connector state and live log tail
+- **Cloudflare Tunnel** — quick or named tunnel, public URL with copy/open/retry, connector state and live log tail, and local links that map public paths or hostnames to other loopback services
 - **Console Log** — live day-grouped request inspector with status filters, collapsible search, expandable request/response payloads and one-tap copy
 - **Settings** — port, auto-start, retention, storage, runtime info
 
@@ -67,10 +67,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.7>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.8>.
 
 ```bash
-adb install -r 9router-android-1.3.7-debug.apk
+adb install -r 9router-android-1.3.8-debug.apk
 ```
 
 Or download the artifact and open it on the device (allow install from unknown
@@ -231,10 +231,37 @@ separate Termux install. The tunnel is optional and off by default.
 The connector runs inside the proxy foreground service and starts automatically
 when **tunnel_enabled** is set, including after boot if auto-start is enabled.
 
-Only the OpenAI-compatible surface is published: `/v1/models`,
-`/v1/chat/completions` and their short aliases. Cloudflared connects to a
-separate loopback listener; the management API, settings, keys, logs and
-Telegram endpoints stay reachable only on the device.
+### Local links
+
+The tunnel can publish more than the gateway. In **Local links** add one entry
+per service running on the device:
+
+- **Local URL** — loopback only (`localhost`, `127.0.0.1` or `[::1]`) with the
+  port your app listens on, for example `http://127.0.0.1:8080`. The gateway
+  ports are blocked so a link cannot point back at 9Router.
+- **Public path** — a prefix such as `/site` on the tunnel's main hostname. This
+  works with quick tunnels, where the trycloudflare hostname is generated.
+  `/site` redirects to `/site/` so relative asset links resolve correctly.
+- **Public hostname** — for named tunnels, a hostname such as `site.example.com`
+  that you add to the tunnel in Zero Trust. The screen shows the ingress target
+  (`http://127.0.0.1:<publicPort>`) to point the hostname at.
+- **Strip public path** — forwards `/site/page` as `/page`, which is what most
+  sub-path deployments expect. Turn it off for apps that need the full prefix.
+- **Enable switch** — temporarily hide a link without deleting it.
+
+Links are matched by hostname first, then by the longest matching path. Reserved
+gateway routes (`/v1`, `/models`, `/chat`, `/api/health`) always go to 9Router,
+so a link cannot shadow the API. HTTP, SSE and WebSocket traffic are relayed
+without buffering, redirects are passed to the browser instead of followed, and
+requests carry `X-Forwarded-Proto`, `X-Forwarded-Host` and `X-Forwarded-Prefix`.
+At most 12 links are stored.
+
+Only the OpenAI-compatible surface and the enabled local links are published:
+`/v1/models`, `/v1/chat/completions`, their short aliases, and the link paths.
+Cloudflared connects to a separate loopback listener; the management API,
+settings, keys, logs and Telegram endpoints stay reachable only on the device.
+A local link can expose a service that has no authentication of its own, so only
+publish apps you intend to share.
 
 The bundled `cloudflared` is the Termux Android/arm64 build (2026.11.0),
 executed directly from `nativeLibraryDir`. It is packaged for `arm64-v8a` only:

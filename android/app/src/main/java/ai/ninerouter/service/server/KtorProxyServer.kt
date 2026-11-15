@@ -4,6 +4,7 @@ import ai.ninerouter.BuildConfig
 import ai.ninerouter.core.AppContainer
 import ai.ninerouter.core.AppRepository
 import ai.ninerouter.core.ProxyRuntime
+import ai.ninerouter.core.TunnelLinks
 import ai.ninerouter.data.model.CustomProvider
 import ai.ninerouter.data.model.ProviderConnection
 import ai.ninerouter.engine.ChatContext
@@ -14,6 +15,8 @@ import ai.ninerouter.engine.UpstreamClient
 import ai.ninerouter.engine.boolean
 import ai.ninerouter.engine.int
 import ai.ninerouter.engine.string
+import ai.ninerouter.service.server.TunnelProxy.forwardWebSocket
+import ai.ninerouter.service.server.TunnelProxy.installLinkRouter
 import ai.ninerouter.util.Crypto
 import ai.ninerouter.util.Json
 import io.ktor.http.ContentType
@@ -28,6 +31,8 @@ import io.ktor.server.engine.ApplicationEngine
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.plugins.cors.routing.CORS
 import io.ktor.server.plugins.statuspages.StatusPages
+import io.ktor.server.websocket.WebSockets
+import io.ktor.server.websocket.webSocket
 import io.ktor.server.request.*
 import io.ktor.server.response.header
 import io.ktor.server.response.respondOutputStream
@@ -135,14 +140,36 @@ object KtorProxyServer {
                 }
             }
         }
+        install(WebSockets) {
+            pingPeriodMillis = 20_000
+            timeoutMillis = 20_000
+            maxFrameSize = Long.MAX_VALUE
+            masking = false
+        }
+        // Local links are matched before routing so a hostname link can own its
+        // root page while reserved /v1 routes keep going to the gateway.
+        installLinkRouter(repo)
         routing {
+            webSocket("/{...}") {
+                forwardWebSocket(repo)
+            }
             get("/") {
+                val links = TunnelLinks.decode(repo.getSetting(TunnelLinks.SETTINGS_KEY))
                 call.respondText(
                     buildJsonObject {
                         put("name", "9Router Android public tunnel")
                         put("status", "running")
                         put("endpoint", "/v1")
                         put("auth", "Bearer API key required for chat completions")
+                        putJsonArray("links") {
+                            links.filter { it.enabled }.forEach { link ->
+                                add(buildJsonObject {
+                                    put("name", link.name)
+                                    put("path", link.path)
+                                    put("host", link.host)
+                                })
+                            }
+                        }
                     }.toString(),
                     ContentType.Application.Json,
                 )

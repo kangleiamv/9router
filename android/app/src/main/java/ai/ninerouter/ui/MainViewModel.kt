@@ -5,6 +5,10 @@ import ai.ninerouter.core.CompatibleProbe
 import ai.ninerouter.core.DashboardStats
 import ai.ninerouter.core.ProxyRuntime
 import ai.ninerouter.core.ProviderUsage
+import ai.ninerouter.core.TunnelLink
+import ai.ninerouter.core.TunnelLinkDraft
+import ai.ninerouter.core.TunnelLinks
+import ai.ninerouter.core.TunnelPorts
 import ai.ninerouter.core.TunnelRuntime
 import ai.ninerouter.core.TunnelState
 import ai.ninerouter.data.model.ApiKey
@@ -229,6 +233,65 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             token = "",
             hostname = current["tunnel_hostname"].orEmpty(),
         )
+    }
+
+    /** Persist a validated local link. The public listener reads it per request. */
+    fun saveTunnelLink(link: TunnelLink) {
+        viewModelScope.launch {
+            runCatching {
+                val port = ProxyRuntime.port.value
+                val safe = TunnelLinks.fromDraft(
+                    TunnelLinkDraft(
+                        name = link.name,
+                        host = link.host,
+                        path = link.path,
+                        target = link.target,
+                        stripPrefix = link.stripPrefix,
+                        enabled = link.enabled,
+                    ),
+                    existingId = link.id,
+                    blockedPorts = setOf(port, TunnelPorts.publicPort(port)),
+                )
+                val current = TunnelLinks.decode(repo.getSetting(TunnelLinks.SETTINGS_KEY))
+                val index = current.indexOfFirst { it.id == safe.id }
+                val next = if (index >= 0) {
+                    current.toMutableList().also { it[index] = safe }
+                } else {
+                    current + safe
+                }
+                if (next.size > TunnelLinks.MAX_LINKS) {
+                    throw IllegalArgumentException("At most ${TunnelLinks.MAX_LINKS} local links are supported.")
+                }
+                repo.putSetting(TunnelLinks.SETTINGS_KEY, TunnelLinks.encode(next))
+                refreshSettings()
+            }.onFailure { emit(it.message ?: "Could not save the local link", true) }
+        }
+    }
+
+    fun deleteTunnelLink(id: String) {
+        viewModelScope.launch {
+            runCatching {
+                val current = TunnelLinks.decode(repo.getSetting(TunnelLinks.SETTINGS_KEY))
+                repo.putSetting(
+                    TunnelLinks.SETTINGS_KEY,
+                    TunnelLinks.encode(current.filterNot { it.id == id }),
+                )
+                refreshSettings()
+            }.onFailure { emit(it.message ?: "Could not delete the local link", true) }
+        }
+    }
+
+    fun setTunnelLinkEnabled(id: String, enabled: Boolean) {
+        viewModelScope.launch {
+            runCatching {
+                val current = TunnelLinks.decode(repo.getSetting(TunnelLinks.SETTINGS_KEY))
+                repo.putSetting(
+                    TunnelLinks.SETTINGS_KEY,
+                    TunnelLinks.encode(current.map { if (it.id == id) it.copy(enabled = enabled) else it }),
+                )
+                refreshSettings()
+            }.onFailure { emit(it.message ?: "Could not update the local link", true) }
+        }
     }
 
     fun saveSettingsAndRestart(values: Map<String, String>) {

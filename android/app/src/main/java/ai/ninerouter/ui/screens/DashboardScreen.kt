@@ -161,7 +161,7 @@ fun DashboardScreen(
                                 tunnel.status == TunnelStatus.RUNNING && tunnel.publicUrl.isNotBlank() -> tunnel.publicUrl
                                 tunnel.status == TunnelStatus.ERROR -> tunnel.message.ifBlank { "Connector error" }
                                 tunnel.status == TunnelStatus.RUNNING -> "Connected · hostname not set"
-                                else -> "Expose the gateway with a public URL"
+                                else -> "Expose the API or local apps publicly"
                             },
                             style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                             color = if (tunnel.status == TunnelStatus.RUNNING) Brand else TextMuted,

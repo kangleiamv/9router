@@ -130,7 +130,8 @@ class AppRepository(context: android.content.Context) {
             "tunnel_enabled" to "false",
             "tunnel_mode" to "quick",
             "tunnel_hostname" to "",
-            "tunnel_token" to ""
+            "tunnel_token" to "",
+            "tunnel_links" to "[]"
         )
         val existing = settingDao.getAll().map { it.key }.toSet()
         defaults.forEach { (key, value) ->

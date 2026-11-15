@@ -188,6 +188,42 @@ class TunnelLinksTest {
     }
 
     @Test
+    fun `named ftp links route by host and path without an http origin`() {
+        val host = link(
+            host = "files.example.com",
+            target = "ftp://127.0.0.1:2121",
+            kind = TunnelLinks.KIND_FTP,
+            key = "abc",
+        )
+        val byHost = TunnelLinks.match(
+            listOf(host),
+            "files.example.com:443",
+            "/folder/readme.txt?k=abc",
+        )
+        assertEquals(host.id, byHost!!.link.id)
+        assertEquals("ftp://127.0.0.1:2121", byHost.targetUrl)
+
+        val path = link(
+            path = "/ftp",
+            target = "ftp://127.0.0.1:2122",
+            kind = TunnelLinks.KIND_FTP,
+            key = "xyz",
+        )
+        val byPath = TunnelLinks.match(listOf(path), "gateway.example.com", "/ftp")
+        assertEquals(path.id, byPath!!.link.id)
+        assertEquals("ftp://127.0.0.1:2122", byPath.targetUrl)
+        assertNull(TunnelLinks.match(listOf(path), "gateway.example.com", "/ftp2"))
+    }
+
+    @Test
+    fun `stored links without a kind infer ftp from the target`() {
+        val raw = """[{"id":"a","name":"Files","target":"ftp://127.0.0.1:2121","mode":"quick"}]"""
+        val restored = TunnelLinks.decode(raw).single()
+        assertEquals(TunnelLinks.KIND_FTP, restored.kind)
+        assertTrue(TunnelLinks.isFtp(restored))
+    }
+
+    @Test
     fun `requires a public path or hostname`() {
         val error = runCatching { TunnelLinks.fromDraft(draft()) }.exceptionOrNull()
         assertTrue(error is IllegalArgumentException)

@@ -426,8 +426,8 @@ fun TunnelScreen(viewModel: MainViewModel) {
                     if (links.isEmpty()) {
                         Spacer(Modifier.height(10.dp))
                         Text(
-                            "No local links yet. Add a service such as http://127.0.0.1:8080. " +
-                                "Quick links get their own trycloudflare.com URL; named links use a path or hostname on the shared tunnel.",
+                            "No local links yet. Add a web app such as http://127.0.0.1:8080, or a local FTP server " +
+                                "such as ftp://127.0.0.1:2121. Quick links get their own URL; named links use the shared tunnel.",
                             style = MaterialTheme.typography.bodySmall,
                             color = TextMuted,
                         )
@@ -442,15 +442,18 @@ fun TunnelScreen(viewModel: MainViewModel) {
                             }
                             TunnelLinkRow(
                                 link = link,
-                                publicUrl = if (TunnelLinks.isQuick(link)) {
-                                    linkTunnels[link.id]?.publicUrl.orEmpty()
-                                } else {
-                                    TunnelLinks.publicUrl(
-                                        tunnel.publicUrl,
-                                        settings["tunnel_mode"] ?: "quick",
-                                        link,
-                                    )
-                                },
+                                publicUrl = TunnelLinks.browserUrl(
+                                    if (TunnelLinks.isQuick(link)) {
+                                        linkTunnels[link.id]?.publicUrl.orEmpty()
+                                    } else {
+                                        TunnelLinks.publicUrl(
+                                            tunnel.publicUrl,
+                                            settings["tunnel_mode"] ?: "quick",
+                                            link,
+                                        )
+                                    },
+                                    link,
+                                ),
                                 quickState = linkTunnels[link.id],
                                 gatewayMode = settings["tunnel_mode"] ?: "quick",
                                 gatewayRunning = tunnel.status == TunnelStatus.RUNNING,
@@ -592,6 +595,7 @@ private fun TunnelLinkRow(
     onRetry: () -> Unit,
 ) {
     val quick = TunnelLinks.isQuick(link)
+    val ftp = TunnelLinks.isFtp(link)
     val pillColor = if (!quick) {
         Brand
     } else {
@@ -601,6 +605,11 @@ private fun TunnelLinkRow(
             TunnelStatus.ERROR -> Rose
             else -> TextMuted
         }
+    }
+    val modeLabel = if (ftp) {
+        if (quick) "Quick FTP" else "Named FTP"
+    } else {
+        if (quick) "Quick" else "Named"
     }
     val scope = buildString {
         if (!quick) {
@@ -618,10 +627,14 @@ private fun TunnelLinkRow(
                 Text(link.name, style = MaterialTheme.typography.titleSmall, color = TextPrimary)
                 Spacer(Modifier.height(3.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    StatusPill(if (quick) "Quick" else "Named", pillColor)
+                    StatusPill(modeLabel, pillColor)
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        if (quick) "dedicated trycloudflare.com URL" else scope.ifBlank { "root page" },
+                        when {
+                            quick && ftp -> "browser view · access key"
+                            quick -> "dedicated trycloudflare.com URL"
+                            else -> scope.ifBlank { "root page" }
+                        },
                         style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
                         color = if (quick) TextMuted else Brand,
                         maxLines = 1,
@@ -670,6 +683,20 @@ private fun TunnelLinkRow(
                 !gatewayRunning -> LinkHint("Waiting for the named tunnel…", TextMuted)
                 publicUrl.isNotBlank() -> LinkUrlBlock(publicUrl, copied, onCopy, onOpen)
                 else -> LinkHint("Add this hostname to the named tunnel in Zero Trust.", Amber)
+            }
+            if (ftp) {
+                if (quick) {
+                    LinkHint(
+                        "Browser only. Native FTP needs a Named link with a separate TCP hostname.",
+                        TextMuted,
+                    )
+                } else {
+                    LinkHint(
+                        "Native FTP: ${TunnelLinks.nativeFtpTarget(link)} on a separate Zero Trust hostname, " +
+                            "then cloudflared access tcp or WARP.",
+                        TextMuted,
+                    )
+                }
             }
         }
 
@@ -752,6 +779,11 @@ private fun LinkEditorDialog(
     var linkMode by remember(initial?.id) {
         mutableStateOf(initial?.let { TunnelLinks.modeOf(it) } ?: TunnelLinks.MODE_QUICK)
     }
+    var linkKind by remember(initial?.id) {
+        mutableStateOf(initial?.let { TunnelLinks.kindOf(it) } ?: TunnelLinks.KIND_HTTP)
+    }
+    var ftpUser by remember(initial?.id) { mutableStateOf(initial?.username.orEmpty()) }
+    var ftpPassword by remember(initial?.id) { mutableStateOf(initial?.password.orEmpty()) }
     var stripPrefix by remember(initial?.id) { mutableStateOf(initial?.stripPrefix ?: true) }
     var error by remember(initial?.id) { mutableStateOf<String?>(null) }
 
@@ -772,15 +804,32 @@ private fun LinkEditorDialog(
                 Spacer(Modifier.height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     ModeChoice(
+                        title = "Web app",
+                        subtitle = "HTTP / HTTPS",
+                        selected = linkKind == TunnelLinks.KIND_HTTP,
+                        modifier = Modifier.weight(1f),
+                        onClick = { linkKind = TunnelLinks.KIND_HTTP },
+                    )
+                    ModeChoice(
+                        title = "FTP server",
+                        subtitle = "Browse or native FTP",
+                        selected = linkKind == TunnelLinks.KIND_FTP,
+                        modifier = Modifier.weight(1f),
+                        onClick = { linkKind = TunnelLinks.KIND_FTP },
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ModeChoice(
                         title = "Quick link",
-                        subtitle = "Own trycloudflare URL",
+                        subtitle = if (linkKind == TunnelLinks.KIND_FTP) "Own URL, browser only" else "Own trycloudflare URL",
                         selected = linkMode == TunnelLinks.MODE_QUICK,
                         modifier = Modifier.weight(1f),
                         onClick = { linkMode = TunnelLinks.MODE_QUICK },
                     )
                     ModeChoice(
                         title = "Named link",
-                        subtitle = "Shared tunnel",
+                        subtitle = if (linkKind == TunnelLinks.KIND_FTP) "Browser + TCP route" else "Shared tunnel",
                         selected = linkMode == TunnelLinks.MODE_NAMED,
                         modifier = Modifier.weight(1f),
                         onClick = { linkMode = TunnelLinks.MODE_NAMED },
@@ -791,64 +840,116 @@ private fun LinkEditorDialog(
                     value = name,
                     onValueChange = { name = it },
                     label = "Name",
-                    placeholder = "My website",
+                    placeholder = if (linkKind == TunnelLinks.KIND_FTP) "Phone FTP" else "My website",
                     singleLine = true,
                 )
                 Spacer(Modifier.height(10.dp))
                 AppTextField(
                     value = target,
                     onValueChange = { target = it },
-                    label = "Local URL",
-                    placeholder = "http://127.0.0.1:8080",
+                    label = if (linkKind == TunnelLinks.KIND_FTP) "Local FTP URL" else "Local URL",
+                    placeholder = if (linkKind == TunnelLinks.KIND_FTP) {
+                        "ftp://127.0.0.1:2121"
+                    } else {
+                        "http://127.0.0.1:8080"
+                    },
                     singleLine = true,
-                    supportingText = "Loopback only: localhost, 127.0.0.1 or [::1].",
+                    supportingText = if (linkKind == TunnelLinks.KIND_FTP) {
+                        "Loopback only, with an optional folder: ftp://127.0.0.1:2121/files."
+                    } else {
+                        "Loopback only: localhost, 127.0.0.1 or [::1]."
+                    },
                 )
+                if (linkKind == TunnelLinks.KIND_FTP) {
+                    Spacer(Modifier.height(10.dp))
+                    AppTextField(
+                        value = ftpUser,
+                        onValueChange = { ftpUser = it },
+                        label = "FTP username",
+                        placeholder = "anonymous",
+                        singleLine = true,
+                        supportingText = "Leave both fields blank for anonymous FTP.",
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    AppTextField(
+                        value = ftpPassword,
+                        onValueChange = { ftpPassword = it },
+                        label = "FTP password",
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        supportingText = "Stored encrypted with the Android Keystore.",
+                    )
+                }
                 if (linkMode == TunnelLinks.MODE_NAMED) {
                     Spacer(Modifier.height(10.dp))
                     AppTextField(
                         value = path,
                         onValueChange = { path = it },
-                        label = "Public path",
+                        label = if (linkKind == TunnelLinks.KIND_FTP) "Browser path" else "Public path",
                         placeholder = "/site",
                         singleLine = true,
-                        supportingText = "Optional on the main named hostname. Leave blank for hostname-only links.",
+                        supportingText = if (linkKind == TunnelLinks.KIND_FTP) {
+                            "Optional. The browser opens the FTP root or this path on the named hostname."
+                        } else {
+                            "Optional on the main named hostname. Leave blank for hostname-only links."
+                        },
                     )
                     Spacer(Modifier.height(10.dp))
                     AppTextField(
                         value = host,
                         onValueChange = { host = it },
-                        label = "Public hostname",
+                        label = if (linkKind == TunnelLinks.KIND_FTP) "Browser hostname" else "Public hostname",
                         placeholder = "site.example.com",
                         singleLine = true,
-                        supportingText = "Point this hostname at the local tunnel router in Zero Trust.",
+                        supportingText = if (linkKind == TunnelLinks.KIND_FTP) {
+                            "HTTP ingress for the browser. Native FTP needs a separate TCP hostname in Zero Trust."
+                        } else {
+                            "Point this hostname at the local tunnel router in Zero Trust."
+                        },
                     )
-                    Spacer(Modifier.height(6.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text("Strip public path", style = MaterialTheme.typography.bodyMedium, color = TextPrimary)
-                            Text(
-                                "Forward /site/page as /page to the local app.",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = TextMuted,
+                    if (linkKind == TunnelLinks.KIND_HTTP) {
+                        Spacer(Modifier.height(6.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text("Strip public path", style = MaterialTheme.typography.bodyMedium, color = TextPrimary)
+                                Text(
+                                    "Forward /site/page as /page to the local app.",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = TextMuted,
+                                )
+                            }
+                            Switch(
+                                checked = stripPrefix,
+                                onCheckedChange = { stripPrefix = it },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = Color.White,
+                                    checkedTrackColor = Brand,
+                                    checkedBorderColor = Brand,
+                                    uncheckedThumbColor = TextSecondary,
+                                    uncheckedTrackColor = AppSurfaceHigh,
+                                    uncheckedBorderColor = AppBorder,
+                                ),
                             )
                         }
-                        Switch(
-                            checked = stripPrefix,
-                            onCheckedChange = { stripPrefix = it },
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = Color.White,
-                                checkedTrackColor = Brand,
-                                checkedBorderColor = Brand,
-                                uncheckedThumbColor = TextSecondary,
-                                uncheckedTrackColor = AppSurfaceHigh,
-                                uncheckedBorderColor = AppBorder,
-                            ),
+                    } else {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Native FTP (optional): add a different hostname in Zero Trust with service " +
+                                "${TunnelLinks.nativeFtpTarget(TunnelLink("", "", target = target))}. " +
+                                "Clients then run cloudflared access tcp, or use WARP.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Amber,
                         )
                     }
                 } else {
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "The public URL is generated when the tunnel starts. Quick links need no path or domain.",
+                        if (linkKind == TunnelLinks.KIND_FTP) {
+                            "Quick FTP opens a browser file browser with a unique trycloudflare.com URL and access key. " +
+                                "Cloudflare quick tunnels cannot carry native FTP; choose Named for a TCP route."
+                        } else {
+                            "The public URL is generated when the tunnel starts. Quick links need no path or domain."
+                        },
                         style = MaterialTheme.typography.labelSmall,
                         color = TextMuted,
                     )
@@ -875,8 +976,12 @@ private fun LinkEditorDialog(
                             stripPrefix = stripPrefix,
                             enabled = initial?.enabled ?: true,
                             mode = linkMode,
+                            kind = linkKind,
+                            username = ftpUser,
+                            password = ftpPassword,
                         ),
                         existingId = initial?.id,
+                        existingKey = initial?.key,
                         blockedPorts = blockedPorts,
                     )
                 }.onSuccess(onSave).onFailure { error = it.message ?: "Invalid local link" }

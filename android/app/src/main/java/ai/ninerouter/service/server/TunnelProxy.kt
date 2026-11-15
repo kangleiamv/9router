@@ -122,6 +122,13 @@ internal object TunnelProxy {
             return
         }
 
+        // FTP links are served by the in-app browser; there is no HTTP origin
+        // to forward to and cloudflared quick tunnels cannot carry FTP itself.
+        if (TunnelLinks.isFtp(route.link)) {
+            FtpBrowser.serve(call, route.link)
+            return
+        }
+
         val target = runCatching { Request.Builder().url(route.targetUrl) }.getOrNull()
             ?: return call.respondText(
                 "Invalid local target for ${route.link.name}.",
@@ -240,6 +247,10 @@ internal object TunnelProxy {
         )
         if (route == null) {
             close(CloseReason(CloseReason.Codes.CANNOT_ACCEPT, "No tunnel link for this path"))
+            return
+        }
+        if (TunnelLinks.isFtp(route.link)) {
+            close(CloseReason(CloseReason.Codes.CANNOT_ACCEPT, "FTP links use the HTTP file browser"))
             return
         }
         bridgeWebSocket(route)

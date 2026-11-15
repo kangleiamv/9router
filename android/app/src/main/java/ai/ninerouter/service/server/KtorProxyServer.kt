@@ -166,6 +166,7 @@ object KtorProxyServer {
                                 add(buildJsonObject {
                                     put("name", link.name)
                                     put("mode", TunnelLinks.modeOf(link))
+                                    put("kind", TunnelLinks.kindOf(link))
                                     put("path", link.path)
                                     put("host", link.host)
                                 })

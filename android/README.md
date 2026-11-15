@@ -18,7 +18,7 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 | OAuth | Browser sign-in for Antigravity, Gemini CLI and Claude Code with a one-shot loopback callback, PKCE for Claude, automatic token refresh |
 | Routing | Combos, vision combo, per-account fallback, exponential backoff, model locks |
 | Telegram | Bot API long polling inside the foreground service, `/help` `/model` `/combo` `/vision` `/status` `/quota` `/clear` |
-| Cloudflare Tunnel | Optional public endpoint via a bundled native `cloudflared` connector: quick `trycloudflare.com` URLs or named Zero Trust tunnels, plus local links that each choose their own quick connector or the shared named tunnel |
+| Cloudflare Tunnel | Optional public endpoint via a bundled native `cloudflared` connector: quick `trycloudflare.com` URLs or named Zero Trust tunnels, plus local links that each choose their own quick connector or the shared named tunnel; HTTP links and FTP servers with a browser file view or a native named TCP route |
 | UI | Compose Material 3, Obsidian dark theme, drawer navigation |
 | Background | Foreground service + boot receiver (auto-start optional) |
 
@@ -31,7 +31,7 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 - **Usage** — animated 7-day/hourly charts, provider and status breakdowns, and a dedicated Overview / Request log switcher with a day-grouped, filterable request feed
 - **Quota Tracker** — live provider limits (Antigravity, Gemini CLI, Claude, DeepSeek, Groq, GLM, OpenCode, Vercel AI Gateway, Ollama Cloud, MiniMax), animated gauges, reset countdowns, local usage fallback, and cooldown/model-lock tracking
 - **Telegram Bot** — bot token, owner chat id, routing, notifications, commands
-- **Cloudflare Tunnel** — quick or named tunnel, public URL with copy/open/retry, connector state and live log tail, and local links where every link chooses a dedicated Quick tunnel or the shared Named tunnel
+- **Cloudflare Tunnel** — quick or named tunnel, public URL with copy/open/retry, connector state and live log tail, and local links where every link chooses a dedicated Quick tunnel or the shared Named tunnel, including local FTP servers shown in an access-key protected browser
 - **Console Log** — live day-grouped request inspector with status filters, collapsible search, expandable request/response payloads and one-tap copy
 - **Settings** — port, auto-start, retention, storage, runtime info
 
@@ -67,10 +67,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.9>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.10>.
 
 ```bash
-adb install -r 9router-android-1.3.9-debug.apk
+adb install -r 9router-android-1.3.10-debug.apk
 ```
 
 Or download the artifact and open it on the device (allow install from unknown
@@ -274,6 +274,36 @@ links are stored.
 Edits apply immediately: saving, deleting or toggling a link reconciles only the
 quick connectors that changed, without restarting the gateway connector or
 changing its URL.
+
+### FTP servers
+
+Choose **FTP server** when adding a local link to publish an FTP server running
+on the device or on a Termux session:
+
+- **Local FTP URL** — plain FTP on loopback only, for example
+  `ftp://127.0.0.1:2121`, with an optional base folder such as
+  `ftp://127.0.0.1:2121/files`. FTPS/SFTP, credentials in the URL, non-loopback
+  hosts and `..` segments are rejected.
+- **FTP username / password** — optional; leave both blank for anonymous FTP.
+  The password is stored with the Android Keystore and is only used inside the
+  app. A base folder limits everything the link can reach.
+- **Quick FTP** — Cloudflare quick tunnels carry HTTP only and the bundled
+  `cloudflared` rejects `ftp://` origins, so a quick FTP link gets its own
+  `https://<random>.trycloudflare.com` **file browser** instead: folder
+  navigation, download, and upload up to 64 MB per file. The shown URL carries
+  a random access key (`?k=...`); without it the page and upload form return
+  401.
+- **Named FTP** — the same browser works on the named hostname or path. For the
+  real FTP protocol add a *separate* hostname in Zero Trust with service
+  `tcp://127.0.0.1:<ftpPort>` and a Service Auth or WARP policy. The link row
+  shows that ingress target and the client command
+  `cloudflared access tcp --hostname <ftp-hostname> --url 127.0.0.1:<port>`.
+  Native FTP is unavailable on quick tunnels, and one hostname cannot serve
+  both HTTP and TCP, so the browser and native FTP always use different
+  hostnames.
+
+Anyone with the browser URL and access key can list, download and change files,
+so share FTP links as carefully as the server's own credentials.
 
 Only the OpenAI-compatible surface and the enabled local links are published:
 `/v1/models`, `/v1/chat/completions`, their short aliases, quick-link hostnames

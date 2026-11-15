@@ -14,8 +14,8 @@ android {
         applicationId = "ai.ninerouter"
         minSdk = 26
         targetSdk = 34
-        versionCode = 14
-        versionName = "1.3.9"
+        versionCode = 15
+        versionName = "1.3.10"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
@@ -86,6 +86,7 @@ dependencies {
     implementation("io.ktor:ktor-server-websockets:$ktorVersion")
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("commons-net:commons-net:3.11.1")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")

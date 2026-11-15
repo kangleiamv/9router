@@ -252,8 +252,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         stripPrefix = link.stripPrefix,
                         enabled = link.enabled,
                         mode = link.mode,
+                        kind = link.kind,
+                        username = link.username,
+                        password = link.password,
                     ),
                     existingId = link.id,
+                    existingKey = link.key,
                     blockedPorts = setOf(port, TunnelPorts.publicPort(port)),
                 )
                 val current = TunnelLinks.decode(repo.getSetting(TunnelLinks.SETTINGS_KEY))

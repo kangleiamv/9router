@@ -15,7 +15,10 @@ class TunnelLinksTest {
         stripPrefix: Boolean = true,
         enabled: Boolean = true,
         mode: String = TunnelLinks.MODE_NAMED,
-    ) = TunnelLinkDraft(name, host, path, target, stripPrefix, enabled, mode)
+        kind: String = TunnelLinks.KIND_HTTP,
+        username: String = "",
+        password: String = "",
+    ) = TunnelLinkDraft(name, host, path, target, stripPrefix, enabled, mode, kind, username, password)
 
     private fun link(
         id: String = "a",
@@ -26,7 +29,11 @@ class TunnelLinksTest {
         stripPrefix: Boolean = true,
         enabled: Boolean = true,
         mode: String = TunnelLinks.MODE_NAMED,
-    ) = TunnelLink(id, name, host, path, target, stripPrefix, enabled, mode)
+        kind: String = TunnelLinks.KIND_HTTP,
+        key: String = "",
+        username: String = "",
+        password: String = "",
+    ) = TunnelLink(id, name, host, path, target, stripPrefix, enabled, mode, kind, key, username, password)
 
     @Test
     fun `normalizes loopback targets`() {
@@ -55,6 +62,129 @@ class TunnelLinksTest {
         }.exceptionOrNull()
         assertTrue(error is IllegalArgumentException)
         assertTrue(error!!.message!!.contains("belongs to the 9Router gateway"))
+    }
+
+    @Test
+    fun `normalizes loopback ftp targets and rejects traversal`() {
+        assertEquals("ftp://127.0.0.1:2121", TunnelLinks.normalizeFtpTarget("2121"))
+        assertEquals("ftp://localhost:2121/files", TunnelLinks.normalizeFtpTarget("ftp://localhost:2121/files/"))
+        assertEquals("ftp://127.0.0.1", TunnelLinks.normalizeFtpTarget("ftp://127.0.0.1:21"))
+        assertNull(TunnelLinks.normalizeFtpTarget("ftps://127.0.0.1:2121"))
+        assertNull(TunnelLinks.normalizeFtpTarget("ftp://192.168.1.10:2121"))
+        assertNull(TunnelLinks.normalizeFtpTarget("ftp://127.0.0.1:2121/../etc"))
+        assertNull(TunnelLinks.normalizeFtpTarget("ftp://user:pass@127.0.0.1:2121"))
+    }
+
+    @Test
+    fun `resolves browser paths under the ftp base`() {
+        assertEquals("/files/a.txt", TunnelLinks.absoluteFtpPath("/files", "/a.txt"))
+        assertEquals("/files", TunnelLinks.absoluteFtpPath("/files", "/"))
+        assertEquals("/a", TunnelLinks.absoluteFtpPath("", "/a"))
+        assertNull(TunnelLinks.absoluteFtpPath("/files", "/../secret"))
+        assertNull(TunnelLinks.cleanRelativePath("/a/../b"))
+        assertNull(TunnelLinks.cleanRelativePath("/a\\b"))
+    }
+
+    @Test
+    fun `infers ftp kind from the target`() {
+        assertEquals(TunnelLinks.KIND_FTP, TunnelLinks.normalizeKind("", "ftp://127.0.0.1:2121"))
+        assertEquals(TunnelLinks.KIND_HTTP, TunnelLinks.normalizeKind("", "http://127.0.0.1:8080"))
+        assertEquals(
+            TunnelLinks.KIND_FTP,
+            TunnelLinks.kindOf(link(target = "ftp://127.0.0.1:2121", kind = "")),
+        )
+    }
+
+    @Test
+    fun `quick ftp links get a key and no http target`() {
+        val saved = TunnelLinks.fromDraft(
+            draft(
+                name = "",
+                target = "ftp://127.0.0.1:2121",
+                mode = TunnelLinks.MODE_QUICK,
+                kind = TunnelLinks.KIND_FTP,
+                username = "ftpuser",
+                password = "secret",
+            ),
+        )
+        assertEquals("FTP server", saved.name)
+        assertEquals(TunnelLinks.KIND_FTP, saved.kind)
+        assertEquals("ftpuser", saved.username)
+        assertEquals("secret", saved.password)
+        assertTrue(saved.key.isNotBlank())
+        assertEquals("", saved.host)
+        assertEquals("", saved.path)
+
+        val route = TunnelLinks.match(
+            listOf(saved),
+            "random.trycloudflare.com",
+            "/folder/file.bin",
+            mapOf("random.trycloudflare.com" to saved.id),
+        )
+        assertEquals(saved.id, route!!.link.id)
+        assertEquals("ftp://127.0.0.1:2121", route.targetUrl)
+    }
+
+    @Test
+    fun `edit keeps the ftp access key`() {
+        val first = TunnelLinks.fromDraft(
+            draft(target = "2121", mode = TunnelLinks.MODE_QUICK, kind = TunnelLinks.KIND_FTP),
+        )
+        val second = TunnelLinks.fromDraft(
+            draft(
+                name = "Changed",
+                target = "ftp://127.0.0.1:2121",
+                mode = TunnelLinks.MODE_QUICK,
+                kind = TunnelLinks.KIND_FTP,
+            ),
+            existingId = first.id,
+            existingKey = first.key,
+        )
+        assertEquals(first.key, second.key)
+    }
+
+    @Test
+    fun `named ftp links expose browser and native tcp details`() {
+        val ftp = link(
+            host = "ftp.example.com",
+            target = "ftp://127.0.0.1:2121",
+            kind = TunnelLinks.KIND_FTP,
+            key = "abc123",
+        )
+        assertEquals("tcp://127.0.0.1:2121", TunnelLinks.nativeFtpTarget(ftp))
+        assertEquals(
+            "cloudflared access tcp --hostname ftp.example.com --url 127.0.0.1:2121",
+            TunnelLinks.nativeFtpCommand("ftp.example.com", ftp),
+        )
+        assertEquals(
+            "https://ftp.example.com/?k=abc123",
+            TunnelLinks.browserUrl("https://ftp.example.com", ftp),
+        )
+        assertEquals(
+            "https://abc.trycloudflare.com/?k=abc123",
+            TunnelLinks.browserUrl("https://abc.trycloudflare.com", ftp.copy(mode = TunnelLinks.MODE_QUICK)),
+        )
+        assertEquals(
+            "https://ftp.example.com/",
+            TunnelLinks.browserUrl("https://ftp.example.com", ftp.copy(kind = TunnelLinks.KIND_HTTP)),
+        )
+    }
+
+    @Test
+    fun `ftp credentials survive storage without exposing the password`() {
+        val ftp = link(
+            target = "ftp://127.0.0.1:2121",
+            kind = TunnelLinks.KIND_FTP,
+            key = "k1",
+            username = "user",
+            password = "hunter2",
+        )
+        val stored = TunnelLinks.encode(listOf(ftp))
+        val restored = TunnelLinks.decode(stored).single()
+        assertEquals("user", restored.username)
+        assertEquals("hunter2", restored.password)
+        assertEquals("k1", restored.key)
+        assertEquals(TunnelLinks.KIND_FTP, restored.kind)
     }
 
     @Test

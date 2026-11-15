@@ -45,6 +45,8 @@ object Crypto {
         null
     }
 
+    fun isEncrypted(value: String?): Boolean = value?.startsWith(PREFIX) == true
+
     fun encrypt(plain: String?): String? {
         if (plain.isNullOrEmpty()) return plain
         val key = secretKey() ?: return plain

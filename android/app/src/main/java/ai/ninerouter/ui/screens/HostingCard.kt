@@ -124,9 +124,9 @@ internal fun HostingCard(
 
         Spacer(Modifier.height(10.dp))
         Text(
-            "Nothing is bundled. 9Router starts runtimes found in its native library " +
-                "folder or on PATH and keeps them on loopback. Android 10+ blocks " +
-                "executing binaries copied into app storage.",
+            "PHP, Node.js, MariaDB and PostgreSQL ship inside the app for arm64 and run " +
+                "from the native library folder on loopback. Python and Redis need a " +
+                "runtime on PATH; Android 10+ blocks binaries copied into app storage.",
             style = MaterialTheme.typography.bodySmall,
             color = TextMuted,
         )
@@ -136,8 +136,8 @@ internal fun HostingCard(
             Spacer(Modifier.height(8.dp))
             Text(
                 if (found.isEmpty()) {
-                    "No runtimes found. Bundle libphp.so/libnode.so and friends, or run the " +
-                        "service in Termux and publish it as a local link."
+                    "No runtimes found. Install Python or Redis on PATH, or run the service " +
+                        "in Termux and publish it as a local link."
                 } else {
                     "Found: " + found.joinToString(" · ") { it.label }
                 },
@@ -280,8 +280,12 @@ private fun ServiceRow(
         if (!available) {
             Spacer(Modifier.height(4.dp))
             Text(
-                "Runtime not found or not executable here. Bundle ${spec.binaries.joinToString(" or ")} " +
-                "as a native library, or run it in Termux and publish it as a link.",
+                if (spec.bundled) {
+                    "The bundled ${spec.label} library is missing from this APK (arm64 build)."
+                } else {
+                    "Runtime not found. Install ${spec.binaries.joinToString(" or ")} on PATH, " +
+                        "or run it in Termux and publish it as a link."
+                },
                 style = MaterialTheme.typography.labelSmall,
                 color = Amber,
             )
@@ -405,8 +409,9 @@ private fun HostingEditorDialog(
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text(
-                    "9Router runs the installed runtime with an app-owned folder and keeps it on loopback. " +
-                        "Database services get a generated password.",
+                    "PHP, Node.js, MariaDB and PostgreSQL are ready to run. Each service gets an " +
+                        "app-owned folder on loopback; database services get a generated password " +
+                        "and create their data files on first start.",
                     style = MaterialTheme.typography.bodySmall,
                     color = TextMuted,
                 )
@@ -430,6 +435,13 @@ private fun HostingEditorDialog(
                     style = MaterialTheme.typography.labelSmall,
                     color = TextMuted,
                 )
+                if (kind.id == "postgres" || kind.id == "mysql") {
+                    Text(
+                        "The first start initializes the database, which can take a few seconds.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Amber,
+                    )
+                }
                 Spacer(Modifier.height(10.dp))
                 AppTextField(
                     value = name,

@@ -17,6 +17,7 @@ class HostingTest {
             data = File(root, "data"),
             home = File(root, "home"),
             temp = File(root, "tmp"),
+            runtime = File(root, "runtime"),
         )
     }
 
@@ -57,14 +58,19 @@ class HostingTest {
             service("php", 8008),
             layout,
             binaries("php"),
+            searchDirs = listOf(File("/data/usr/bin")),
         )
         assertEquals(File("/data/usr/bin/php"), plan.program)
-        assertEquals(listOf("-S", "127.0.0.1:8008", "-t", layout.content.absolutePath), plan.args)
+        assertEquals(
+            listOf("-n", "-S", "127.0.0.1:8008", "-t", layout.content.absolutePath),
+            plan.args,
+        )
         assertEquals(layout.content, plan.workDir)
         assertEquals("http://127.0.0.1:8008/", plan.webUrl)
         assertTrue(plan.scaffold.keys.single().name == "index.php")
         assertEquals(layout.content.absolutePath, plan.env["DOCUMENT_ROOT"])
         assertTrue(plan.env["PATH"]!!.isNotEmpty())
+        assertEquals(File("/data/usr/bin").absolutePath, plan.env["LD_LIBRARY_PATH"])
     }
 
     @Test
@@ -123,7 +129,7 @@ class HostingTest {
         val plan = HostingPlanner.plan(
             service("postgres", 5433, password = "pgpass1"),
             layout,
-            binaries("postgres", "initdb"),
+            binaries("pg", "initdb"),
         )
         assertEquals(
             listOf(
@@ -141,26 +147,40 @@ class HostingTest {
         val pwfile = plan.files.keys.single()
         assertEquals("pgpass1\n", plan.files[pwfile])
         assertTrue(step.args.contains(pwfile.absolutePath))
+        assertEquals(listOf(pwfile), plan.privateFiles)
     }
 
     @Test
-    fun `mysql installs the data dir once and seeds app credentials`() {
+    fun `mysql bootstraps once and seeds app credentials`() {
         val layout = layout()
         val plan = HostingPlanner.plan(
             service("mysql", 3307, password = "mysqlpw"),
             layout,
-            binaries("mariadbd", "mariadb-install-db"),
+            binaries("mariadbd"),
         )
         assertEquals(File("/data/usr/bin/mariadbd"), plan.program)
         assertTrue(plan.args.contains("--bind-address=127.0.0.1"))
         assertTrue(plan.args.contains("--port=3307"))
+        assertTrue(plan.args.contains("--basedir=${layout.runtime.absolutePath}"))
+        assertTrue(
+            plan.args.contains("--lc-messages-dir=${File(layout.runtime, "share/mariadb")}"),
+        )
         assertTrue(plan.args.any { it.startsWith("--init-file=") })
-        val step = plan.setup.single()
-        assertTrue(step.args.contains("--datadir=${layout.data.absolutePath}"))
-        assertEquals(File(layout.data, "mysql"), step.skipIfExists)
+        assertEquals(0, plan.setup.size)
+
+        val init = plan.init!!
+        assertEquals(File("/data/usr/bin/mariadbd"), init.program)
+        assertTrue(init.args.contains("--bootstrap"))
+        assertEquals(File(layout.data, "mysql"), init.skipIfExists)
+        assertEquals(File(layout.data, "mariadb_upgrade_info"), init.marker)
+        assertTrue(init.prelude.contains("SET @auth_root_socket=NULL;"))
+        assertEquals(6, init.scripts.size)
+        assertTrue(init.scripts.all { it.startsWith(File(layout.runtime, "share/mariadb")) })
+
         val sql = plan.files.values.single()
         assertTrue(sql.contains("CREATE DATABASE IF NOT EXISTS app;"))
         assertTrue(sql.contains("IDENTIFIED BY 'mysqlpw'"))
+        assertTrue(sql.contains("ALTER USER '9router'@'%' IDENTIFIED BY 'mysqlpw';"))
     }
 
     @Test

@@ -1,5 +1,6 @@
 package ai.ninerouter.service.server
 
+import ai.ninerouter.core.HostBootstrap
 import ai.ninerouter.core.HostLayout
 import ai.ninerouter.core.HostServiceState
 import ai.ninerouter.core.HostStatus
@@ -18,6 +19,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.File
+import java.io.OutputStream
 import java.io.InputStreamReader
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -35,6 +37,8 @@ import java.util.concurrent.TimeUnit
  */
 object HostingManager {
     private const val MAX_RESTARTS = 3
+    /** Bump when the bundled runtime files change. */
+    private const val RUNTIME_ASSETS = "pg18.6-md13.0.2-1"
     private const val READY_TIMEOUT_MS = 60_000L
     private const val PORT_TIMEOUT_MS = 250
 
@@ -131,7 +135,85 @@ object HostingManager {
             data = File(root, "data"),
             home = File(root, "home"),
             temp = File(root, "tmp"),
+            runtime = runtimeRoot(context),
         )
+    }
+
+    /**
+     * PostgreSQL is compiled with `/data/data/<package>/hosted` as its prefix,
+     * so its share, extension and temporary files must live exactly there.
+     * The app owns its data directory root, so creating the sibling folder is
+     * allowed; `/data/data` resolves to the per-user mount.
+     */
+    private fun runtimeRoot(context: Context): File =
+        File("/data/data/${context.packageName}/hosted")
+
+    /**
+     * Copy the data files PostgreSQL and MariaDB load at runtime out of the
+     * APK. They are extracted once per runtime revision instead of on every
+     * start, because the pair is a few megabytes and both servers mmap them.
+     */
+    private fun ensureRuntimeAssets(context: Context, spec: HostedKind, layout: HostLayout) {
+        if (spec.id !in setOf("postgres", "mysql")) return
+        val marker = File(layout.runtime, ".assets")
+        if (marker.isFile && marker.readText().trim() == RUNTIME_ASSETS + "-" + spec.id) {
+            ensureRuntimeDirs(spec, layout)
+            return
+        }
+        log(spec.id, "Extracting bundled ${spec.label} files…")
+        when (spec.id) {
+            "postgres" -> {
+                // Share and extension files are replaced together.
+                File(layout.runtime, "share/postgresql").deleteRecursively()
+                File(layout.runtime, "lib/postgresql").deleteRecursively()
+                copyAssetTree(context, "runtimes/postgres/share", File(layout.runtime, "share"))
+                copyAssetTree(context, "runtimes/postgres/lib", File(layout.runtime, "lib"))
+            }
+
+            "mysql" -> {
+                File(layout.runtime, "share/mariadb").deleteRecursively()
+                copyAssetTree(context, "runtimes/mariadb/share", File(layout.runtime, "share"))
+            }
+        }
+        marker.parentFile?.mkdirs()
+        marker.writeText(RUNTIME_ASSETS + "-" + spec.id)
+        ensureRuntimeDirs(spec, layout)
+    }
+
+    private fun ensureRuntimeDirs(spec: HostedKind, layout: HostLayout) {
+        File(layout.runtime, "tmp").mkdirs()
+        if (spec.id == "postgres") {
+            File(layout.runtime, "lib/postgresql").mkdirs()
+            File(layout.runtime, "share/postgresql").mkdirs()
+        }
+        if (spec.id == "mysql") {
+            File(layout.runtime, "share/mariadb").mkdirs()
+        }
+    }
+
+    /** Recursive asset copy; assets cannot contain empty directories. */
+    private fun copyAssetTree(context: Context, assetPath: String, target: File) {
+        val children = context.assets.list(assetPath).orEmpty()
+        if (children.isEmpty()) {
+            target.parentFile?.mkdirs()
+            context.assets.open(assetPath).use { input ->
+                target.outputStream().use { output -> input.copyTo(output) }
+            }
+            return
+        }
+        target.mkdirs()
+        children.forEach { child -> copyAssetTree(context, "$assetPath/$child", File(target, child)) }
+    }
+
+    /** Owner-only directory, required by PostgreSQL for its data directory. */
+    private fun restrict(dir: File) {
+        dir.mkdirs()
+        dir.setReadable(false, false)
+        dir.setWritable(false, false)
+        dir.setExecutable(false, false)
+        dir.setReadable(true, true)
+        dir.setWritable(true, true)
+        dir.setExecutable(true, true)
     }
 
     /** Start one service. Safe to call twice; does nothing while it runs. */
@@ -156,6 +238,7 @@ object HostingManager {
             }
             try {
                 val layout = layout(app, service.id)
+                ensureRuntimeAssets(app, spec, layout)
                 val bins = resolve(app, spec)
                 if (bins.isEmpty()) {
                     throw IllegalStateException(
@@ -170,6 +253,10 @@ object HostingManager {
                     binaries = bins,
                     searchDirs = searchDirs(app),
                 )
+                if (spec.id == "postgres" || spec.id == "mysql") {
+                    restrict(layout.data)
+                    restrict(File(layout.root, "run"))
+                }
                 if (execBlocked(app, plan.program)) {
                     throw IllegalStateException(
                         "Android 10+ blocks executing ${plan.program.name} from app storage. " +
@@ -198,6 +285,14 @@ object HostingManager {
                         )
                     }
                 }
+                plan.init?.let { init ->
+                    val skip = init.skipIfExists
+                    if (skip == null || !skip.exists()) {
+                        runBootstrap(init, plan.env, plan.workDir, service.id)
+                    }
+                }
+                // The password file is only needed while initdb runs.
+                plan.privateFiles.forEach { runCatching { it.delete() } }
                 if (synchronized(lock) { stopping.remove(service.id) }) {
                     HostingRuntime.update(service.id) {
                         it.copy(status = HostStatus.STOPPED, message = "Stopped")
@@ -323,6 +418,59 @@ object HostingManager {
                 restarts = it.restarts,
             )
         }
+    }
+
+    /**
+     * Feed the concatenated SQL scripts to a one-shot initializer (MariaDB
+     * --bootstrap). Output is captured like a normal service log.
+     */
+    private suspend fun runBootstrap(
+        init: HostBootstrap,
+        env: Map<String, String>,
+        workDir: File,
+        id: String,
+    ) {
+        log(id, "Running ${init.program.name} ${init.args.joinToString(" ")}")
+        val builder = ProcessBuilder(listOf(init.program.absolutePath) + init.args)
+            .directory(workDir)
+            .redirectErrorStream(true)
+        builder.environment().putAll(env)
+        val process = builder.start()
+        val pump = scope.launch { pumpLogs(id, process) }
+        runCatching {
+            process.outputStream.use { out -> writeBootstrap(init, out) }
+        }.onFailure {
+            runCatching { process.destroyForcibly() }
+            throw IllegalStateException("Could not write the ${init.program.name} bootstrap: ${it.message}")
+        }
+        val code = runCatching {
+            if (process.waitFor(5, TimeUnit.MINUTES)) process.exitValue() else {
+                process.destroyForcibly()
+                -1
+            }
+        }.getOrDefault(-1)
+        pump.join()
+        if (code != 0) {
+            throw IllegalStateException(
+                "${init.program.name} exited with code $code while creating the database.",
+            )
+        }
+        init.marker?.let { marker ->
+            marker.parentFile?.mkdirs()
+            marker.writeText(init.markerText)
+        }
+        log(id, "Database files created.")
+    }
+
+    private fun writeBootstrap(init: HostBootstrap, out: OutputStream) {
+        out.write(init.prelude.toByteArray(Charsets.UTF_8))
+        init.scripts.forEach { script ->
+            if (!script.isFile) {
+                throw IllegalStateException("Missing bootstrap script ${script.absolutePath}.")
+            }
+            script.inputStream().use { it.copyTo(out) }
+        }
+        out.flush()
     }
 
     private fun runSetup(

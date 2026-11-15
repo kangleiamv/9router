@@ -19,7 +19,7 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 | Routing | Combos, vision combo, per-account fallback, exponential backoff, model locks |
 | Telegram | Bot API long polling inside the foreground service, `/help` `/model` `/combo` `/vision` `/status` `/quota` `/clear` |
 | Cloudflare Tunnel | Optional public endpoint via a bundled native `cloudflared` connector: quick `trycloudflare.com` URLs or named Zero Trust tunnels, plus local links that each choose their own quick connector or the shared named tunnel; HTTP apps, an optional on-device FTP host with a browser file view, and named TCP routes for databases and SSH |
-| Hosting | Supervised on-device PHP, Node.js, Python, Redis, PostgreSQL and MySQL runtimes on loopback, with app-owned folders, generated credentials, log capture, restarts and one-tap publishing to a local link |
+| Hosting | Supervised on-device PHP, Node.js, Python, Redis, PostgreSQL and MySQL runtimes on loopback. PHP, Node.js, MariaDB and PostgreSQL are bundled as arm64 native libraries; every service gets an app-owned folder, generated credentials, log capture, restarts and one-tap publishing to a local link |
 | UI | Compose Material 3, Obsidian dark theme, drawer navigation |
 | Background | Foreground service + boot receiver (auto-start optional) |
 
@@ -68,11 +68,14 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.12>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.13>.
 
 ```bash
-adb install -r 9router-android-1.3.12-debug.apk
+adb install -r 9router-android-1.3.13-debug.apk
 ```
+
+The APK is about 98 MB because it carries the arm64 hosting runtimes. It builds
+and runs on any ABI, but the bundled runtimes are `arm64-v8a` only.
 
 Or download the artifact and open it on the device (allow install from unknown
 sources for the file manager you use).
@@ -261,9 +264,9 @@ Press **Detect** (or the refresh icon in the Local links header) to probe those
 ports on loopback in parallel. Each detected service is listed with its name
 and port, and **Use** fills the editor. Link rows also show whether their target
 is currently listening. Scanning only opens short-lived TCP connections to
-`127.0.0.1`. The app does not bundle PHP, Node.js, nginx, MySQL or any other
-runtime: it publishes services already running (for example in Termux) or starts
-them from the **Hosting** card when a runtime is available on the device.
+`127.0.0.1`. Links publish services already running (for example in Termux), or
+the PHP, Node.js, MariaDB and PostgreSQL services started from the **Hosting**
+card.
 
 Every link also has:
 
@@ -404,9 +407,11 @@ and `home`, `tmp` and `logs` beside them.
 - **Redis** — AOF persistence in `data`, loopback bind and a generated
   `requirepass`.
 - **PostgreSQL** — `initdb` with `scram-sha-256` on first start, then `postgres`
-  on loopback. The generated password is shown while it runs.
-- **MySQL / MariaDB** — `mariadb-install-db` once, then `mariadbd` bound to
-  `127.0.0.1` with an `app` database and a generated user and password.
+  on loopback. The generated password is shown while it runs, and the temporary
+  password file is deleted once `initdb` finishes.
+- **MySQL / MariaDB** — the bundled SQL bootstrap scripts are streamed to
+  `mariadbd --bootstrap` once, then `mariadbd` binds `127.0.0.1` with an `app`
+  database and a generated user and password.
 
 Processes bind loopback only and are supervised: output is captured (the card
 shows the tail), an unexpected exit restarts up to three times with a backoff,
@@ -417,11 +422,46 @@ a Named TCP link for databases. Credentials are stored with the Android
 Keystore. The hosting card validates ports against the gateway, public
 listener, FTP host and passive range.
 
-**Runtimes are not bundled.** 9Router looks for `php`, `node`, `python3`,
-`redis-server`, `postgres`, `mariadbd`/`mysqld` and the matching setup tools in:
+#### Bundled runtimes (arm64-v8a)
 
-1. the APK native library directory (`libphp.so`, `libnode.so`, …), the only
-   app location Android 10+ lets an app execute;
+PHP, Node.js, MariaDB and PostgreSQL are compiled binaries shipped inside the
+APK, so the hosting card works on a stock device without Termux:
+
+| Runtime | Version | Entry library |
+| --- | --- | --- |
+| PHP CLI | 8.5.12 | `libphp.so` |
+| Node.js | 26.13.1 | `libnode.so` |
+| MariaDB | 13.0.2 | `libmariadbd.so` |
+| PostgreSQL | 18.6 | `libpg.so`, `libinitdb.so` |
+
+They are Android/bionic `aarch64` builds from the Termux packages,
+repackaged as `jniLibs` and extracted by the installer to the app's
+`nativeLibraryDir`, the only location Android 10+ lets an app execute. Library
+files that carry a version suffix upstream (`libssl.so.3`, `libz.so.1`,
+`libicu*.so.79`, …) are renamed with a `9r` infix (`libssl9r.so`, `libz9r.so`)
+because the APK packager only accepts names ending in `.so`; `DT_NEEDED` and
+`DT_SONAME` are rewritten to match, and the infix keeps them from shadowing the
+system copies of the same libraries.
+
+PostgreSQL and MariaDB also need data files at runtime. About 11 MB of
+PostgreSQL `share`/`lib` files and MariaDB `share` files are stored as APK
+assets and extracted on first start to
+`/data/data/ai.ninerouter/hosted` (PostgreSQL is compiled with that prefix).
+Both servers then keep their own data directory in `files/hosting/<id>/data`
+with owner-only permissions.
+
+Licenses of the bundled runtimes:
+
+- PHP — PHP License 3.01 (<https://www.php.net/license/3_01.txt>)
+- Node.js — MIT (<https://github.com/nodejs/node/blob/main/LICENSE>)
+- MariaDB — GNU GPL v2 (<https://mariadb.com/kb/en/mariadb-license/>)
+- PostgreSQL — PostgreSQL License
+  (<https://www.postgresql.org/about/licence/>)
+
+Python and Redis are not bundled. 9Router looks for `python3` and
+`redis-server` on `PATH`, and for every runtime also in:
+
+1. the APK native library directory (`libphp.so`, `libnode.so`, …);
 2. directories on `PATH`;
 3. `files/hosting/bin` and `files/bin` (works on Android 9 and older; Android
    10+ blocks executing binaries copied into app storage).
@@ -429,6 +469,9 @@ listener, FTP host and passive range.
 Termux keeps its binaries in the Termux app sandbox, so 9Router cannot execute
 them. Run the service in Termux as usual and publish it with a local link:
 **Detect** finds the port, and the link editor fills the target.
+
+On a non-arm64 device the rest of the app works, but the hosting card reports
+that the bundled runtime is missing, and only PATH runtimes can start.
 
 ## Notes and limits
 
@@ -446,10 +489,10 @@ them. Run the service in Termux as usual and publish it with a local link:
   or Anthropic password ever reaches the app. Tokens are stored encrypted and
   refreshed automatically before they expire.
 - The FTP host and the service scan only work while the app process is alive;
-  the host starts with the proxy foreground service. The app publishes existing
-  loopback services and does not bundle their runtimes.
+  the host starts with the proxy foreground service.
 - Cloudflare quick tunnels carry HTTP only. TCP services and native FTP need a
   Named tunnel, a Zero Trust hostname and a client policy.
-- Hosted runtimes need a binary that Android lets the app execute. Copying a
-  binary into app storage is not enough on Android 10+; bundle it as a native
-  library or keep running it in Termux and publish the port instead.
+- PHP, Node.js, MariaDB and PostgreSQL are bundled for `arm64-v8a` only. Python
+  and Redis need a binary that Android lets the app execute: copying one into
+  app storage is not enough on Android 10+, so keep running them in Termux and
+  publish the port instead.

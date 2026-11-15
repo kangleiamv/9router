@@ -14,8 +14,8 @@ android {
         applicationId = "ai.ninerouter"
         minSdk = 26
         targetSdk = 34
-        versionCode = 17
-        versionName = "1.3.12"
+        versionCode = 18
+        versionName = "1.3.13"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
@@ -40,6 +40,7 @@ android {
         compose = true
         buildConfig = true
     }
+    sourceSets["main"].jniLibs.srcDirs("../runtime-packs")
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"

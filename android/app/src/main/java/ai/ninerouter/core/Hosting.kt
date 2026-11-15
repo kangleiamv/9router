@@ -13,11 +13,12 @@ import java.io.File
  * Runtimes the app can host on the device: PHP, Node.js, Python, Redis,
  * PostgreSQL and MySQL/MariaDB.
  *
- * The app never bundles these runtimes. It finds a real binary on the device
- * (an app-private `bin` folder, the environment PATH, or Termux), then starts
- * it on loopback with an app-owned document root or data directory. Processes
- * are supervised: logs are captured, a crashed process is restarted with a
- * backoff, and stopping a service kills the whole process tree.
+ * PHP, Node.js, MariaDB and PostgreSQL ship as native libraries for arm64 and
+ * execute from the APK native library directory. Python and Redis use a real
+ * binary found on PATH. Every service starts on loopback with an app-owned
+ * document root or data directory. Processes are supervised: logs are
+ * captured, a crashed process is restarted with a backoff, and stopping a
+ * service kills the whole process tree.
  */
 data class HostedKind(
     val id: String,
@@ -29,6 +30,8 @@ data class HostedKind(
     val defaultUser: String,
     val binaries: List<String>,
     val setupBinaries: List<String> = emptyList(),
+    /** Ships in the APK as an arm64 native library. */
+    val bundled: Boolean = false,
 ) {
     val web: Boolean get() = linkKind == TunnelLinks.KIND_HTTP
 }
@@ -43,6 +46,7 @@ object HostedKinds {
         linkKind = TunnelLinks.KIND_HTTP,
         defaultUser = "",
         binaries = listOf("php"),
+        bundled = true,
     )
     val node = HostedKind(
         id = "node",
@@ -53,6 +57,7 @@ object HostedKinds {
         linkKind = TunnelLinks.KIND_HTTP,
         defaultUser = "",
         binaries = listOf("node"),
+        bundled = true,
     )
     val python = HostedKind(
         id = "python",
@@ -82,8 +87,10 @@ object HostedKinds {
         scheme = "tcp",
         linkKind = TunnelLinks.KIND_TCP,
         defaultUser = "postgres",
-        binaries = listOf("postgres"),
+        // The bundled server is libpg.so so initdb can find it as a sibling.
+        binaries = listOf("postgres", "pg"),
         setupBinaries = listOf("initdb"),
+        bundled = true,
     )
     val mysql = HostedKind(
         id = "mysql",
@@ -94,7 +101,7 @@ object HostedKinds {
         linkKind = TunnelLinks.KIND_TCP,
         defaultUser = "9router",
         binaries = listOf("mariadbd", "mysqld"),
-        setupBinaries = listOf("mariadb-install-db", "mysql_install_db"),
+        bundled = true,
     )
 
     val all: List<HostedKind> = listOf(php, node, python, redis, postgres, mysql)
@@ -275,6 +282,8 @@ data class HostLayout(
     val data: File,
     val home: File,
     val temp: File,
+    /** Shared runtime files (`share`, `lib`, `tmp`) for PostgreSQL/MariaDB. */
+    val runtime: File,
 ) {
     val logs: File get() = File(root, "logs")
 }
@@ -284,6 +293,21 @@ data class HostSetupStep(
     val args: List<String>,
     /** Skip the step when this path already exists. */
     val skipIfExists: File? = null,
+)
+
+/**
+ * One-shot initialization streamed over stdin, used when the upstream
+ * installer is a shell script (MariaDB). [scripts] are concatenated after
+ * [prelude] and fed to the process.
+ */
+data class HostBootstrap(
+    val program: File,
+    val args: List<String>,
+    val scripts: List<File>,
+    val prelude: String,
+    val skipIfExists: File? = null,
+    val marker: File? = null,
+    val markerText: String = "",
 )
 
 data class HostingPlan(
@@ -296,6 +320,9 @@ data class HostingPlan(
     /** Starter files written only when missing, never overwriting user edits. */
     val scaffold: Map<File, String> = emptyMap(),
     val setup: List<HostSetupStep> = emptyList(),
+    val init: HostBootstrap? = null,
+    /** Plaintext secrets removed once one-shot setup succeeds. */
+    val privateFiles: List<File> = emptyList(),
     val webUrl: String? = null,
 )
 
@@ -332,14 +359,16 @@ object HostingPlanner {
             "PATH" to path,
             "LANG" to "C.UTF-8",
         )
-        val dirs = searchDirs.joinToString(":") { "${it.absolutePath}/lib" }
-        if (dirs.isNotBlank()) env["LD_LIBRARY_PATH"] = dirs
+        if (searchDirs.isNotEmpty()) {
+            env["LD_LIBRARY_PATH"] = searchDirs.joinToString(":") { it.absolutePath }
+        }
 
         layout.content.mkdirs()
         layout.data.mkdirs()
         layout.home.mkdirs()
         layout.temp.mkdirs()
         layout.logs.mkdirs()
+        layout.runtime.mkdirs()
 
         return when (spec.id) {
             "php" -> {
@@ -347,6 +376,7 @@ object HostingPlanner {
                 HostingPlan(
                     program = bin(spec.binaries),
                     args = listOf(
+                        "-n",
                         "-S", "127.0.0.1:${service.port}",
                         "-t", layout.content.absolutePath,
                     ),
@@ -442,6 +472,7 @@ object HostingPlanner {
                     env = env + mapOf("PGDATA" to layout.data.absolutePath),
                     workDir = layout.data,
                     files = mapOf(pwfile to password + "\n"),
+                    privateFiles = listOf(pwfile),
                     setup = listOf(
                         HostSetupStep(
                             program = initdb,
@@ -464,15 +495,17 @@ object HostingPlanner {
                 val password = service.password.ifBlank { HostingStore.newPassword() }
                 val initFile = File(layout.root, "init.sql")
                 val socket = File(layout.root, "run").apply { mkdirs() }
-                val installer = bin(spec.setupBinaries)
+                val share = File(layout.runtime, "share/mariadb")
                 val sql = buildString {
                     appendLine("CREATE DATABASE IF NOT EXISTS app;")
                     appendLine(
                         "CREATE USER IF NOT EXISTS '$user'@'%' IDENTIFIED BY '$password';",
                     )
+                    appendLine("ALTER USER '$user'@'%' IDENTIFIED BY '$password';")
                     appendLine(
                         "CREATE USER IF NOT EXISTS '$user'@'127.0.0.1' IDENTIFIED BY '$password';",
                     )
+                    appendLine("ALTER USER '$user'@'127.0.0.1' IDENTIFIED BY '$password';")
                     appendLine("GRANT ALL PRIVILEGES ON *.* TO '$user'@'%' WITH GRANT OPTION;")
                     appendLine(
                         "GRANT ALL PRIVILEGES ON *.* TO '$user'@'127.0.0.1' WITH GRANT OPTION;",
@@ -482,27 +515,44 @@ object HostingPlanner {
                 HostingPlan(
                     program = bin(spec.binaries),
                     args = listOf(
+                        "--basedir=${layout.runtime.absolutePath}",
                         "--datadir=${layout.data.absolutePath}",
                         "--port=${service.port}",
                         "--bind-address=127.0.0.1",
                         "--socket=${File(socket, "mysql.sock").absolutePath}",
+                        "--pid-file=${File(socket, "mysql.pid").absolutePath}",
                         "--init-file=${initFile.absolutePath}",
                         "--skip-name-resolve",
+                        "--lc-messages-dir=${share.absolutePath}",
+                        "--character-sets-dir=${File(share, "charsets").absolutePath}",
                         "--console",
                     ),
                     env = env,
                     workDir = layout.data,
                     files = mapOf(initFile to sql),
-                    setup = listOf(
-                        HostSetupStep(
-                            program = installer,
-                            args = listOf(
-                                "--datadir=${layout.data.absolutePath}",
-                                "--auth-root-authentication-method=normal",
-                                "--skip-test-db",
-                            ),
-                            skipIfExists = File(layout.data, "mysql"),
+                    init = HostBootstrap(
+                        program = bin(spec.binaries),
+                        args = listOf(
+                            "--bootstrap",
+                            "--basedir=${layout.runtime.absolutePath}",
+                            "--datadir=${layout.data.absolutePath}",
+                            "--log-warnings=0",
+                            "--enforce-storage-engine=",
+                            "--plugin-dir=${File(layout.runtime, "lib/mysql/plugin").absolutePath}",
+                            "--max_allowed_packet=8M",
+                            "--net_buffer_length=16K",
+                            "--lc-messages-dir=${share.absolutePath}",
+                            "--character-sets-dir=${File(share, "charsets").absolutePath}",
                         ),
+                        scripts = MARIA_BOOTSTRAP_FILES.map { File(share, it) },
+                        prelude = buildString {
+                            appendLine("create database if not exists mysql;")
+                            appendLine("use mysql;")
+                            appendLine("SET @auth_root_socket=NULL;")
+                        },
+                        skipIfExists = File(layout.data, "mysql"),
+                        marker = File(layout.data, "mariadb_upgrade_info"),
+                        markerText = MARIA_UPGRADE_INFO,
                     ),
                 )
             }
@@ -510,6 +560,17 @@ object HostingPlanner {
             else -> throw IllegalArgumentException("Unsupported runtime '${spec.id}'.")
         }
     }
+
+    private const val MARIA_UPGRADE_INFO = "13.0.2-MariaDB"
+
+    private val MARIA_BOOTSTRAP_FILES = listOf(
+        "mariadb_system_tables.sql",
+        "mariadb_performance_tables.sql",
+        "mariadb_system_tables_data.sql",
+        "fill_help_tables.sql",
+        "maria_add_gis_sp_bootstrap.sql",
+        "mariadb_sys_schema.sql",
+    )
 
     private const val PHP_INDEX = """<?php
 // Created by 9Router. Replace this file with your own app.

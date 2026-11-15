@@ -12,9 +12,9 @@ import java.net.Socket
  * Catalog of services people commonly run next to 9Router (Termux, a local
  * dev server, a database) with the port each one uses by default.
  *
- * The app does not bundle these runtimes. It publishes services that already
- * listen on loopback: HTTP apps through the browser tunnel, FTP through the
- * file browser and native TCP services through a Zero Trust TCP hostname.
+ * The app publishes services that already listen on loopback: HTTP apps through
+ * the browser tunnel, FTP through the file browser and native TCP services
+ * through a Zero Trust TCP hostname.
  */
 data class LocalServicePreset(
     val id: String,

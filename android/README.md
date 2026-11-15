@@ -19,6 +19,7 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 | Routing | Combos, vision combo, per-account fallback, exponential backoff, model locks |
 | Telegram | Bot API long polling inside the foreground service, `/help` `/model` `/combo` `/vision` `/status` `/quota` `/clear` |
 | Cloudflare Tunnel | Optional public endpoint via a bundled native `cloudflared` connector: quick `trycloudflare.com` URLs or named Zero Trust tunnels, plus local links that each choose their own quick connector or the shared named tunnel; HTTP apps, an optional on-device FTP host with a browser file view, and named TCP routes for databases and SSH |
+| Hosting | Supervised on-device PHP, Node.js, Python, Redis, PostgreSQL and MySQL runtimes on loopback, with app-owned folders, generated credentials, log capture, restarts and one-tap publishing to a local link |
 | UI | Compose Material 3, Obsidian dark theme, drawer navigation |
 | Background | Foreground service + boot receiver (auto-start optional) |
 
@@ -31,7 +32,7 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 - **Usage** — animated 7-day/hourly charts, provider and status breakdowns, and a dedicated Overview / Request log switcher with a day-grouped, filterable request feed
 - **Quota Tracker** — live provider limits (Antigravity, Gemini CLI, Claude, DeepSeek, Groq, GLM, OpenCode, Vercel AI Gateway, Ollama Cloud, MiniMax), animated gauges, reset countdowns, local usage fallback, and cooldown/model-lock tracking
 - **Telegram Bot** — bot token, owner chat id, routing, notifications, commands
-- **Cloudflare Tunnel** — quick or named tunnel, public URL with copy/open/retry, connector state and live log tail, an optional FTP host serving device storage, and local links where every link chooses a dedicated Quick tunnel or the shared Named tunnel; the editor fills service presets and detects listening loopback ports
+- **Cloudflare Tunnel** — quick or named tunnel, public URL with copy/open/retry, connector state and live log tail, an optional FTP host serving device storage, a hosting card that starts PHP/Node.js/Python/Redis/PostgreSQL/MySQL on loopback, and local links where every link chooses a dedicated Quick tunnel or the shared Named tunnel; the editor fills service presets and detects listening loopback ports
 - **Console Log** — live day-grouped request inspector with status filters, collapsible search, expandable request/response payloads and one-tap copy
 - **Settings** — port, auto-start, retention, storage, runtime info
 
@@ -67,10 +68,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.11>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.12>.
 
 ```bash
-adb install -r 9router-android-1.3.11-debug.apk
+adb install -r 9router-android-1.3.12-debug.apk
 ```
 
 Or download the artifact and open it on the device (allow install from unknown
@@ -260,8 +261,9 @@ Press **Detect** (or the refresh icon in the Local links header) to probe those
 ports on loopback in parallel. Each detected service is listed with its name
 and port, and **Use** fills the editor. Link rows also show whether their target
 is currently listening. Scanning only opens short-lived TCP connections to
-`127.0.0.1`; the app does not bundle PHP, Node.js, nginx, MySQL or any other
-runtime, it only publishes services already running (for example in Termux).
+`127.0.0.1`. The app does not bundle PHP, Node.js, nginx, MySQL or any other
+runtime: it publishes services already running (for example in Termux) or starts
+them from the **Hosting** card when a runtime is available on the device.
 
 Every link also has:
 
@@ -387,6 +389,47 @@ executed directly from `nativeLibraryDir`. It is packaged for `arm64-v8a` only:
 on other ABIs the rest of the app works, but the tunnel reports that the
 connector is unavailable.
 
+### Hosting runtimes
+
+The **Hosting** card starts real PHP, Node.js, Python, Redis, PostgreSQL and
+MySQL processes. Each service gets an app-owned folder under
+`files/hosting/<id>` with `public` for web content, `data` for database files,
+and `home`, `tmp` and `logs` beside them.
+
+- **PHP** — `php -S 127.0.0.1:<port> -t <public>` plus a starter `index.php`.
+- **Node.js** — `node server.js` with `PORT`, `HOST=127.0.0.1` and `DOCROOT`,
+  plus a small static `server.js`. Set an entrypoint to run your own file.
+- **Python** — `python3 -m http.server <port> --bind 127.0.0.1 --directory
+  <public>`, or your own entrypoint such as `app.py`.
+- **Redis** — AOF persistence in `data`, loopback bind and a generated
+  `requirepass`.
+- **PostgreSQL** — `initdb` with `scram-sha-256` on first start, then `postgres`
+  on loopback. The generated password is shown while it runs.
+- **MySQL / MariaDB** — `mariadb-install-db` once, then `mariadbd` bound to
+  `127.0.0.1` with an `app` database and a generated user and password.
+
+Processes bind loopback only and are supervised: output is captured (the card
+shows the tail), an unexpected exit restarts up to three times with a backoff,
+and stopping a service kills its process. **Start with 9Router** starts a
+service together with the foreground service, and **Publish** opens the local
+link editor prefilled with the loopback target: an HTTP link for web runtimes,
+a Named TCP link for databases. Credentials are stored with the Android
+Keystore. The hosting card validates ports against the gateway, public
+listener, FTP host and passive range.
+
+**Runtimes are not bundled.** 9Router looks for `php`, `node`, `python3`,
+`redis-server`, `postgres`, `mariadbd`/`mysqld` and the matching setup tools in:
+
+1. the APK native library directory (`libphp.so`, `libnode.so`, …), the only
+   app location Android 10+ lets an app execute;
+2. directories on `PATH`;
+3. `files/hosting/bin` and `files/bin` (works on Android 9 and older; Android
+   10+ blocks executing binaries copied into app storage).
+
+Termux keeps its binaries in the Termux app sandbox, so 9Router cannot execute
+them. Run the service in Termux as usual and publish it with a local link:
+**Detect** finds the port, and the link editor fills the target.
+
 ## Notes and limits
 
 - The management gateway binds to loopback only. Use `adb forward` for desktop
@@ -407,3 +450,6 @@ connector is unavailable.
   loopback services and does not bundle their runtimes.
 - Cloudflare quick tunnels carry HTTP only. TCP services and native FTP need a
   Named tunnel, a Zero Trust hostname and a client policy.
+- Hosted runtimes need a binary that Android lets the app execute. Copying a
+  binary into app storage is not enough on Android 10+; bundle it as a native
+  library or keep running it in Termux and publish the port instead.

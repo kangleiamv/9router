@@ -7,6 +7,11 @@ import ai.ninerouter.core.FtpHostRuntime
 import ai.ninerouter.core.FtpHostSettings
 import ai.ninerouter.core.FtpHostState
 import ai.ninerouter.core.FtpHostStore
+import ai.ninerouter.core.HostServiceState
+import ai.ninerouter.core.HostedKinds
+import ai.ninerouter.core.HostedService
+import ai.ninerouter.core.HostingRuntime
+import ai.ninerouter.core.HostingStore
 import ai.ninerouter.core.LinkTunnelRuntime
 import ai.ninerouter.core.LocalServices
 import ai.ninerouter.core.ProxyRuntime
@@ -31,6 +36,7 @@ import ai.ninerouter.engine.oauth.OAuthException
 import ai.ninerouter.engine.oauth.OAuthProviders
 import ai.ninerouter.engine.specificData
 import ai.ninerouter.service.ProxyForegroundService
+import ai.ninerouter.service.server.HostingManager
 import ai.ninerouter.util.Crypto
 import android.app.Application
 import android.content.Intent
@@ -88,6 +94,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _settings = MutableStateFlow<Map<String, String>>(emptyMap())
     val settings: StateFlow<Map<String, String>> = _settings.asStateFlow()
+
+    /** Saved hosted runtimes, decrypted and in display order. */
+    val hostedServices: StateFlow<List<HostedService>> = _settings
+        .map { HostingStore.decode(it[HostingStore.SETTINGS_KEY]) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val hostingStates: StateFlow<Map<String, HostServiceState>> = HostingRuntime.states
+
+    private val _hostingAvailability = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    val hostingAvailability: StateFlow<Map<String, Boolean>> = _hostingAvailability.asStateFlow()
 
     val running: StateFlow<Boolean> = ProxyRuntime.running
     val port: StateFlow<Int> = ProxyRuntime.port
@@ -282,14 +298,132 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Which runtimes are installed, so the hosting card can badge them. */
+    fun refreshHostingAvailability() {
+        viewModelScope.launch {
+            _hostingAvailability.value = withContext(Dispatchers.IO) {
+                HostingManager.availability(getApplication())
+            }
+        }
+    }
+
+    /** Ports 9Router itself owns and a hosted runtime must not bind. */
+    private suspend fun blockedHostingPorts(): Set<Int> {
+        val gateway = ProxyRuntime.port.value
+        val ftp = FtpHostStore.decode(repo.getSetting(FtpHostStore.SETTINGS_KEY))
+        val ports = mutableSetOf(gateway, TunnelPorts.publicPort(gateway))
+        if (ftp.enabled) ports += ftp.port
+        ports += FtpHostStore.passivePorts.toList()
+        return ports
+    }
+
+    /** Create or update a hosted runtime and apply its process state. */
+    fun saveHostedService(service: HostedService) {
+        val context = getApplication<Application>()
+        viewModelScope.launch {
+            runCatching {
+                val current = HostingStore.decode(repo.getSetting(HostingStore.SETTINGS_KEY))
+                val id = service.id.ifBlank { HostingStore.newId(service.kind, current) }
+                val normalized = normalizeHosted(service.copy(id = id))
+                val index = current.indexOfFirst { it.id == id }
+                val next = if (index >= 0) {
+                    current.toMutableList().also { it[index] = normalized }
+                } else {
+                    current + normalized
+                }
+                val safe = HostingStore.require(next, blockedHostingPorts())
+                repo.putSetting(HostingStore.SETTINGS_KEY, HostingStore.encode(safe))
+                refreshSettings()
+                ProxyForegroundService.syncHosting(context)
+                emit("${normalized.name} saved")
+            }.onFailure { emit(it.message ?: "Could not save the hosted service", true) }
+        }
+    }
+
+    /** Fill defaults that make a fresh runtime usable in one tap. */
+    private fun normalizeHosted(service: HostedService): HostedService {
+        val spec = HostedKinds.byId(service.kind) ?: return service
+        val database = spec.id in HostingStore.DATABASE_KINDS
+        return service.copy(
+            name = service.name.trim().ifBlank { spec.label },
+            entry = service.entry.trim(),
+            username = service.username.trim().ifBlank { spec.defaultUser },
+            password = if (database && service.password.isBlank()) {
+                HostingStore.newPassword()
+            } else {
+                service.password
+            },
+        )
+    }
+
+    fun deleteHostedService(id: String) {
+        val context = getApplication<Application>()
+        viewModelScope.launch {
+            runCatching {
+                val current = HostingStore.decode(repo.getSetting(HostingStore.SETTINGS_KEY))
+                val removed = current.firstOrNull { it.id == id }
+                repo.putSetting(
+                    HostingStore.SETTINGS_KEY,
+                    HostingStore.encode(current.filterNot { it.id == id }),
+                )
+                HostingManager.stop(id)
+                HostingManager.forget(id)
+                refreshSettings()
+                ProxyForegroundService.syncHosting(context)
+                emit("${removed?.name ?: "Service"} deleted")
+            }.onFailure { emit(it.message ?: "Could not delete the hosted service", true) }
+        }
+    }
+
+    fun startHostedService(id: String) {
+        val context = getApplication<Application>()
+        viewModelScope.launch {
+            val service = HostingStore
+                .decode(repo.getSetting(HostingStore.SETTINGS_KEY))
+                .firstOrNull { it.id == id }
+            if (service == null) {
+                emit("That hosted service no longer exists", true)
+                return@launch
+            }
+            // A hosted process must outlive the screen, so keep the foreground
+            // service (which owns the runtime lifecycle) alive.
+            ProxyForegroundService.start(context)
+            runCatching { HostingManager.start(context, service) }
+                .onFailure { emit(it.message ?: "Could not start the service", true) }
+            refreshHostingAvailability()
+        }
+    }
+
+    fun stopHostedService(id: String) {
+        viewModelScope.launch {
+            runCatching { HostingManager.stop(id) }
+                .onFailure { emit(it.message ?: "Could not stop the service", true) }
+        }
+    }
+
+    fun setHostedAutoStart(id: String, autoStart: Boolean) {
+        val context = getApplication<Application>()
+        viewModelScope.launch {
+            runCatching {
+                val current = HostingStore.decode(repo.getSetting(HostingStore.SETTINGS_KEY))
+                val next = current.map { if (it.id == id) it.copy(autoStart = autoStart) else it }
+                repo.putSetting(HostingStore.SETTINGS_KEY, HostingStore.encode(next))
+                refreshSettings()
+                ProxyForegroundService.syncHosting(context)
+            }.onFailure { emit(it.message ?: "Could not update the service", true) }
+        }
+    }
+
     /** Probe loopback ports so the UI can mark services that are actually up. */
     fun scanLocalServices() {
         if (_scanningPorts.value) return
         val links = TunnelLinks.decode(_settings.value[TunnelLinks.SETTINGS_KEY])
         val ftpHost = FtpHostStore.decode(_settings.value[FtpHostStore.SETTINGS_KEY])
+        val hosted = HostingStore.decode(_settings.value[HostingStore.SETTINGS_KEY])
         val ports = (
             LocalServices.defaultPorts +
                 links.mapNotNull { TunnelLinks.targetPort(it.target) } +
+                hosted.map { it.port } +
                 listOfNotNull(ftpHost.port.takeIf { ftpHost.enabled })
             ).distinct()
         viewModelScope.launch {

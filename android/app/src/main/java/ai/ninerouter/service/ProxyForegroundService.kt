@@ -6,6 +6,8 @@ import ai.ninerouter.core.AppContainer
 import ai.ninerouter.core.AppRepository
 import ai.ninerouter.core.CloudflareTunnel
 import ai.ninerouter.core.FtpHostStore
+import ai.ninerouter.core.HostedService
+import ai.ninerouter.core.HostingStore
 import ai.ninerouter.core.LinkTunnelManager
 import ai.ninerouter.core.LinkTunnelRuntime
 import ai.ninerouter.core.ProxyRuntime
@@ -15,6 +17,7 @@ import ai.ninerouter.core.TunnelPorts
 import ai.ninerouter.core.TunnelRuntime
 import ai.ninerouter.core.TunnelStatus
 import ai.ninerouter.service.server.FtpHostManager
+import ai.ninerouter.service.server.HostingManager
 import ai.ninerouter.service.server.KtorProxyServer
 import ai.ninerouter.util.Crypto
 import android.app.Notification
@@ -46,6 +49,7 @@ class ProxyForegroundService : Service() {
         const val ACTION_STOP_TUNNEL = "ai.ninerouter.action.STOP_TUNNEL"
         const val ACTION_SYNC_LINKS = "ai.ninerouter.action.SYNC_LINKS"
         const val ACTION_SYNC_FTP_HOST = "ai.ninerouter.action.SYNC_FTP_HOST"
+        const val ACTION_SYNC_HOSTING = "ai.ninerouter.action.SYNC_HOSTING"
         const val EXTRA_LINK_ID = "ai.ninerouter.extra.LINK_ID"
         const val CHANNEL_ID = "ninerouter_proxy"
         const val NOTIFICATION_ID = 9001
@@ -84,6 +88,14 @@ class ProxyForegroundService : Service() {
                 action = ACTION_SYNC_FTP_HOST
             }
             runCatching { context.startService(intent) }
+        }
+
+        /** Reconcile hosted runtimes after one is added, edited or removed. */
+        fun syncHosting(context: Context) {
+            val intent = Intent(context, ProxyForegroundService::class.java).apply {
+                action = ACTION_SYNC_HOSTING
+            }
+            runCatching { ContextCompat.startForegroundService(context, intent) }
         }
 
         /** Reconcile quick link connectors after a link is added, edited or removed. */
@@ -157,6 +169,14 @@ class ProxyForegroundService : Service() {
                 START_STICKY
             }
 
+            ACTION_SYNC_HOSTING -> {
+                startForegroundIfNeeded()
+                scope.launch {
+                    applyHosting(runCatching { repo.settingsMap() }.getOrDefault(emptyMap()))
+                }
+                START_STICKY
+            }
+
             else -> {
                 startForegroundIfNeeded()
                 scope.launch {
@@ -171,6 +191,7 @@ class ProxyForegroundService : Service() {
                     if (started) {
                         val settings = repo.settingsMap()
                         applyFtpHost(settings)
+                        applyHosting(settings)
                         if (settings["tunnel_enabled"] == "true") {
                             startTunnelInternal(port)
                         }
@@ -184,6 +205,7 @@ class ProxyForegroundService : Service() {
     override fun onDestroy() {
         stopTunnelInternal()
         FtpHostManager.stop()
+        HostingManager.stopAllNow()
         telegram?.stop()
         telegram = null
         KtorProxyServer.stop()
@@ -283,6 +305,14 @@ class ProxyForegroundService : Service() {
         val host = FtpHostStore.decode(settings[FtpHostStore.SETTINGS_KEY])
         withContext(Dispatchers.IO) {
             FtpHostManager.apply(this@ProxyForegroundService, host)
+        }
+    }
+
+    /** Start auto-start runtimes when the gateway service comes up. */
+    private suspend fun applyHosting(settings: Map<String, String>) {
+        val services: List<HostedService> = HostingStore.decode(settings[HostingStore.SETTINGS_KEY])
+        withContext(Dispatchers.IO) {
+            HostingManager.apply(this@ProxyForegroundService, services)
         }
     }
 

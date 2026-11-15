@@ -103,6 +103,9 @@ fun TunnelScreen(viewModel: MainViewModel) {
     val tunnel by viewModel.tunnelState.collectAsState()
     val linkTunnels by viewModel.linkTunnels.collectAsState()
     val ftpHost by viewModel.ftpHostState.collectAsState()
+    val hostedServices by viewModel.hostedServices.collectAsState()
+    val hostingStates by viewModel.hostingStates.collectAsState()
+    val hostingAvailability by viewModel.hostingAvailability.collectAsState()
     val detectedPorts by viewModel.detectedPorts.collectAsState()
     val scanningPorts by viewModel.scanningPorts.collectAsState()
     val port by viewModel.port.collectAsState()
@@ -128,6 +131,7 @@ fun TunnelScreen(viewModel: MainViewModel) {
 
     LaunchedEffect(Unit) {
         viewModel.refreshSettings()
+        viewModel.refreshHostingAvailability()
         viewModel.scanLocalServices()
     }
     LaunchedEffect(settings) {
@@ -415,6 +419,39 @@ fun TunnelScreen(viewModel: MainViewModel) {
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
+            }
+
+            item {
+                HostingCard(
+                    services = hostedServices,
+                    states = hostingStates,
+                    availability = hostingAvailability,
+                    blockedPorts = buildSet {
+                        add(port)
+                        add(TunnelPorts.publicPort(port))
+                        if (ftpHostSettings.enabled) add(ftpHostSettings.port)
+                        addAll(FtpHostStore.passivePorts.toList())
+                    },
+                    onRefreshAvailability = { viewModel.refreshHostingAvailability() },
+                    onSave = { viewModel.saveHostedService(it) },
+                    onDelete = { viewModel.deleteHostedService(it) },
+                    onStart = { viewModel.startHostedService(it) },
+                    onStop = { viewModel.stopHostedService(it) },
+                    onAutoStart = { id, enabled -> viewModel.setHostedAutoStart(id, enabled) },
+                    onPublish = { service ->
+                        val spec = service.spec
+                        if (spec != null) {
+                            editingLink = TunnelLink(
+                                id = "",
+                                name = service.name,
+                                target = service.target,
+                                kind = spec.linkKind,
+                                mode = if (spec.web) TunnelLinks.MODE_QUICK else TunnelLinks.MODE_NAMED,
+                            )
+                            editorOpen = true
+                        }
+                    },
+                )
             }
 
             item {

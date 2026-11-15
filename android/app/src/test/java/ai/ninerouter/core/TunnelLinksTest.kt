@@ -14,7 +14,8 @@ class TunnelLinksTest {
         target: String = "http://127.0.0.1:8080",
         stripPrefix: Boolean = true,
         enabled: Boolean = true,
-    ) = TunnelLinkDraft(name, host, path, target, stripPrefix, enabled)
+        mode: String = TunnelLinks.MODE_NAMED,
+    ) = TunnelLinkDraft(name, host, path, target, stripPrefix, enabled, mode)
 
     private fun link(
         id: String = "a",
@@ -24,7 +25,8 @@ class TunnelLinksTest {
         target: String = "http://127.0.0.1:8080",
         stripPrefix: Boolean = true,
         enabled: Boolean = true,
-    ) = TunnelLink(id, name, host, path, target, stripPrefix, enabled)
+        mode: String = TunnelLinks.MODE_NAMED,
+    ) = TunnelLink(id, name, host, path, target, stripPrefix, enabled, mode)
 
     @Test
     fun `normalizes loopback targets`() {
@@ -211,6 +213,98 @@ class TunnelLinksTest {
             "https://blog.example.com/posts?x=1",
             TunnelLinks.publicLocation("https://localhost:8080/posts?x=1", host, "blog.example.com"),
         )
+    }
+
+    @Test
+    fun `quick links need only a target`() {
+        val saved = TunnelLinks.fromDraft(
+            TunnelLinkDraft(name = "", target = "8080", mode = TunnelLinks.MODE_QUICK),
+        )
+        assertEquals(TunnelLinks.MODE_QUICK, saved.mode)
+        assertEquals("Local link", saved.name)
+        assertEquals("http://127.0.0.1:8080", saved.target)
+    }
+
+    @Test
+    fun `quick links discard host and path values`() {
+        val saved = TunnelLinks.fromDraft(
+            TunnelLinkDraft(
+                host = "not a valid host",
+                path = "/v1",
+                target = "8080",
+                mode = TunnelLinks.MODE_QUICK,
+            ),
+        )
+        assertEquals(TunnelLinks.MODE_QUICK, saved.mode)
+        assertEquals("", saved.host)
+        assertEquals("", saved.path)
+    }
+
+    @Test
+    fun `named links require a hostname or path`() {
+        val error = runCatching {
+            TunnelLinks.fromDraft(
+                TunnelLinkDraft(name = "Site", target = "8080", mode = TunnelLinks.MODE_NAMED),
+            )
+        }.exceptionOrNull()
+        assertTrue(error is IllegalArgumentException)
+        assertTrue(error!!.message!!.contains("Named links need"))
+    }
+
+    @Test
+    fun `legacy links infer a mode from the stored hostname`() {
+        val legacyNamed = TunnelLinks.decode(
+            """[{"id":"a","name":"Blog","host":"blog.example.com","target":"http://127.0.0.1:3000"}]""",
+        )
+        assertEquals(TunnelLinks.MODE_NAMED, legacyNamed.single().mode)
+        val legacyPath = TunnelLinks.decode(
+            """[{"id":"b","name":"Site","path":"/site","target":"http://127.0.0.1:8080"}]""",
+        )
+        assertEquals(TunnelLinks.MODE_QUICK, legacyPath.single().mode)
+    }
+
+    @Test
+    fun `a quick hostname owns its link at the root`() {
+        val quick = link(
+            id = "q",
+            mode = TunnelLinks.MODE_QUICK,
+            path = "/ignored",
+            target = "http://127.0.0.1:3000/base",
+        )
+        val named = link(id = "n", path = "/site")
+        val hosts = mapOf("random.trycloudflare.com" to "q")
+
+        val route = TunnelLinks.match(
+            listOf(quick, named),
+            "random.trycloudflare.com",
+            "/css/app.css?x=1",
+            hosts,
+        )
+        assertEquals("q", route!!.link.id)
+        assertEquals("http://127.0.0.1:3000/base/css/app.css?x=1", route.targetUrl)
+
+        // A dedicated quick host serves the link everywhere, including paths
+        // that are reserved on the shared gateway hostname.
+        val reserved = TunnelLinks.match(
+            listOf(quick, named),
+            "random.trycloudflare.com",
+            "/v1/models",
+            hosts,
+        )
+        assertEquals("q", reserved!!.link.id)
+    }
+
+    @Test
+    fun `quick links never match a path on the shared tunnel`() {
+        val quick = link(mode = TunnelLinks.MODE_QUICK, path = "/site")
+        assertNull(TunnelLinks.match(listOf(quick), "abc.trycloudflare.com", "/site/page"))
+    }
+
+    @Test
+    fun `quick links have no shared public URL`() {
+        val quick = link(mode = TunnelLinks.MODE_QUICK, path = "/site")
+        assertEquals("", TunnelLinks.publicUrl("https://abc.trycloudflare.com", "quick", quick))
+        assertEquals("", TunnelLinks.ingressSummary(listOf(quick), 20128))
     }
 
     @Test

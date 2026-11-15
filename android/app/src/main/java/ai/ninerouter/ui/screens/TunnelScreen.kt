@@ -63,6 +63,7 @@ import ai.ninerouter.core.TunnelLink
 import ai.ninerouter.core.TunnelLinkDraft
 import ai.ninerouter.core.TunnelLinks
 import ai.ninerouter.core.TunnelPorts
+import ai.ninerouter.core.TunnelState
 import ai.ninerouter.core.TunnelStatus
 import ai.ninerouter.ui.MainViewModel
 import ai.ninerouter.ui.components.AppCard
@@ -97,6 +98,7 @@ import kotlinx.coroutines.delay
 fun TunnelScreen(viewModel: MainViewModel) {
     val settings by viewModel.settings.collectAsState()
     val tunnel by viewModel.tunnelState.collectAsState()
+    val linkTunnels by viewModel.linkTunnels.collectAsState()
     val port by viewModel.port.collectAsState()
     val keys by viewModel.keys.collectAsState()
 
@@ -346,7 +348,8 @@ fun TunnelScreen(viewModel: MainViewModel) {
                     Text("Mode", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "Quick tunnels are anonymous and get a new URL every start. Named tunnels keep a stable hostname from your Cloudflare account.",
+                        "This mode publishes the API gateway. Quick links always get their own connector and URL; " +
+                            "named links use the shared named tunnel configured here.",
                         style = MaterialTheme.typography.bodySmall,
                         color = TextMuted,
                     )
@@ -408,7 +411,7 @@ fun TunnelScreen(viewModel: MainViewModel) {
                         Column(Modifier.weight(1f)) {
                             Text("Local links", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
                             Text(
-                                "Expose another app on this device through the same tunnel.",
+                                "Publish other apps on this device. Each link chooses Quick or Named.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = TextMuted,
                             )
@@ -423,8 +426,8 @@ fun TunnelScreen(viewModel: MainViewModel) {
                     if (links.isEmpty()) {
                         Spacer(Modifier.height(10.dp))
                         Text(
-                            "No local links yet. Add a service such as http://127.0.0.1:8080 with a public path like /site, " +
-                                "or a hostname for a named tunnel.",
+                            "No local links yet. Add a service such as http://127.0.0.1:8080. " +
+                                "Quick links get their own trycloudflare.com URL; named links use a path or hostname on the shared tunnel.",
                             style = MaterialTheme.typography.bodySmall,
                             color = TextMuted,
                         )
@@ -439,23 +442,31 @@ fun TunnelScreen(viewModel: MainViewModel) {
                             }
                             TunnelLinkRow(
                                 link = link,
-                                publicUrl = TunnelLinks.publicUrl(
-                                    tunnel.publicUrl,
-                                    settings["tunnel_mode"] ?: "quick",
-                                    link,
-                                ),
-                                tunnelRunning = tunnel.status == TunnelStatus.RUNNING,
+                                publicUrl = if (TunnelLinks.isQuick(link)) {
+                                    linkTunnels[link.id]?.publicUrl.orEmpty()
+                                } else {
+                                    TunnelLinks.publicUrl(
+                                        tunnel.publicUrl,
+                                        settings["tunnel_mode"] ?: "quick",
+                                        link,
+                                    )
+                                },
+                                quickState = linkTunnels[link.id],
+                                gatewayMode = settings["tunnel_mode"] ?: "quick",
+                                gatewayRunning = tunnel.status == TunnelStatus.RUNNING,
                                 copied = copied,
                                 onCopy = { copyValue(it) },
                                 onOpen = { openUrl(it) },
                                 onToggle = { enabled -> viewModel.setTunnelLinkEnabled(link.id, enabled) },
                                 onEdit = { editingLink = link; editorOpen = true },
                                 onDelete = { viewModel.deleteTunnelLink(link.id) },
+                                onRetry = { viewModel.restartTunnelLink(link.id) },
                             )
                         }
                     }
 
-                    if ((settings["tunnel_mode"] ?: "quick") == "token" && links.any { it.host.isNotBlank() }) {
+                    val ingress = TunnelLinks.ingressSummary(links, TunnelPorts.publicPort(port))
+                    if ((settings["tunnel_mode"] ?: "quick") == "token" && ingress.isNotBlank()) {
                         Spacer(Modifier.height(12.dp))
                         HairLine()
                         Spacer(Modifier.height(10.dp))
@@ -468,7 +479,7 @@ fun TunnelScreen(viewModel: MainViewModel) {
                             color = TextMuted,
                         )
                         Spacer(Modifier.height(6.dp))
-                        CodeBlock(TunnelLinks.ingressSummary(links, TunnelPorts.publicPort(port)))
+                        CodeBlock(ingress)
                     }
                 }
             }
@@ -569,32 +580,54 @@ private fun ModeChoice(
 private fun TunnelLinkRow(
     link: TunnelLink,
     publicUrl: String,
-    tunnelRunning: Boolean,
+    quickState: TunnelState?,
+    gatewayMode: String,
+    gatewayRunning: Boolean,
     copied: String?,
     onCopy: (String) -> Unit,
     onOpen: (String) -> Unit,
     onToggle: (Boolean) -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
+    onRetry: () -> Unit,
 ) {
+    val quick = TunnelLinks.isQuick(link)
+    val pillColor = if (!quick) {
+        Brand
+    } else {
+        when (quickState?.status) {
+            TunnelStatus.RUNNING -> Emerald
+            TunnelStatus.STARTING -> Amber
+            TunnelStatus.ERROR -> Rose
+            else -> TextMuted
+        }
+    }
+    val scope = buildString {
+        if (!quick) {
+            if (link.path.isNotBlank()) append(link.path)
+            if (link.host.isNotBlank()) {
+                if (isNotEmpty()) append(" · ")
+                append(link.host)
+            }
+        }
+    }
+
     Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(link.name, style = MaterialTheme.typography.titleSmall, color = TextPrimary)
-                val scope = buildString {
-                    if (link.path.isNotBlank()) append(link.path)
-                    if (link.host.isNotBlank()) {
-                        if (isNotEmpty()) append(" · ")
-                        append(link.host)
-                    }
+                Spacer(Modifier.height(3.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    StatusPill(if (quick) "Quick" else "Named", pillColor)
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        if (quick) "dedicated trycloudflare.com URL" else scope.ifBlank { "root page" },
+                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                        color = if (quick) TextMuted else Brand,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
-                Text(
-                    scope.ifBlank { "Hostname only" },
-                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-                    color = Brand,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
             }
             Switch(
                 checked = link.enabled,
@@ -609,7 +642,7 @@ private fun TunnelLinkRow(
                 ),
             )
         }
-        Spacer(Modifier.height(3.dp))
+        Spacer(Modifier.height(5.dp))
         Text(
             link.target,
             style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
@@ -617,44 +650,29 @@ private fun TunnelLinkRow(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
-        if (link.enabled && tunnelRunning) {
-            if (publicUrl.isNotBlank()) {
-                Spacer(Modifier.height(8.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        publicUrl,
-                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                        color = Brand,
-                        modifier = Modifier.weight(1f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    IconButton(onClick = { onCopy(publicUrl) }, modifier = Modifier.size(30.dp)) {
-                        Icon(
-                            if (copied == publicUrl) Icons.Filled.Check else Icons.Filled.ContentCopy,
-                            contentDescription = "Copy link",
-                            tint = if (copied == publicUrl) Emerald else TextSecondary,
-                            modifier = Modifier.size(16.dp),
-                        )
+
+        if (link.enabled) {
+            when {
+                quick -> when (quickState?.status) {
+                    TunnelStatus.RUNNING -> LinkUrlBlock(publicUrl, copied, onCopy, onOpen)
+                    TunnelStatus.STARTING -> LinkHint("Starting the dedicated quick tunnel…", Amber)
+                    TunnelStatus.ERROR -> {
+                        LinkHint(quickState.message.ifBlank { "Quick tunnel failed." }, Rose)
                     }
-                    IconButton(onClick = { onOpen(publicUrl) }, modifier = Modifier.size(30.dp)) {
-                        Icon(
-                            Icons.Filled.OpenInNew,
-                            contentDescription = "Open link",
-                            tint = TextSecondary,
-                            modifier = Modifier.size(16.dp),
-                        )
-                    }
+                    else -> LinkHint("Start the tunnel to connect this quick link.", TextMuted)
                 }
-            } else if (link.host.isNotBlank()) {
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    "This hostname is reachable after it is added to a named tunnel.",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Amber,
+
+                gatewayMode != "token" -> LinkHint(
+                    "Named links use the shared Named tunnel. Switch Mode to Named and add this hostname there.",
+                    Amber,
                 )
+
+                !gatewayRunning -> LinkHint("Waiting for the named tunnel…", TextMuted)
+                publicUrl.isNotBlank() -> LinkUrlBlock(publicUrl, copied, onCopy, onOpen)
+                else -> LinkHint("Add this hostname to the named tunnel in Zero Trust.", Amber)
             }
         }
+
         Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
             TextButton(onClick = onEdit) {
                 Icon(Icons.Filled.Edit, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(14.dp))
@@ -666,6 +684,56 @@ private fun TunnelLinkRow(
                 Spacer(Modifier.width(4.dp))
                 Text("Delete", color = Rose, style = MaterialTheme.typography.labelMedium)
             }
+            if (quick && quickState?.status == TunnelStatus.ERROR) {
+                TextButton(onClick = onRetry) {
+                    Icon(Icons.Filled.Refresh, contentDescription = null, tint = Amber, modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Retry", color = Amber, style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LinkHint(text: String, color: Color) {
+    Spacer(Modifier.height(6.dp))
+    Text(text, style = MaterialTheme.typography.labelSmall, color = color)
+}
+
+@Composable
+private fun LinkUrlBlock(
+    url: String,
+    copied: String?,
+    onCopy: (String) -> Unit,
+    onOpen: (String) -> Unit,
+) {
+    if (url.isBlank()) return
+    Spacer(Modifier.height(8.dp))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            url,
+            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+            color = Brand,
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        IconButton(onClick = { onCopy(url) }, modifier = Modifier.size(30.dp)) {
+            Icon(
+                if (copied == url) Icons.Filled.Check else Icons.Filled.ContentCopy,
+                contentDescription = "Copy link",
+                tint = if (copied == url) Emerald else TextSecondary,
+                modifier = Modifier.size(16.dp),
+            )
+        }
+        IconButton(onClick = { onOpen(url) }, modifier = Modifier.size(30.dp)) {
+            Icon(
+                Icons.Filled.OpenInNew,
+                contentDescription = "Open link",
+                tint = TextSecondary,
+                modifier = Modifier.size(16.dp),
+            )
         }
     }
 }
@@ -681,6 +749,9 @@ private fun LinkEditorDialog(
     var target by remember(initial?.id) { mutableStateOf(initial?.target.orEmpty()) }
     var path by remember(initial?.id) { mutableStateOf(initial?.path.orEmpty()) }
     var host by remember(initial?.id) { mutableStateOf(initial?.host.orEmpty()) }
+    var linkMode by remember(initial?.id) {
+        mutableStateOf(initial?.let { TunnelLinks.modeOf(it) } ?: TunnelLinks.MODE_QUICK)
+    }
     var stripPrefix by remember(initial?.id) { mutableStateOf(initial?.stripPrefix ?: true) }
     var error by remember(initial?.id) { mutableStateOf<String?>(null) }
 
@@ -693,11 +764,28 @@ private fun LinkEditorDialog(
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text(
-                    "Forward a loopback service through the tunnel. Use a path for quick tunnels, or a " +
-                        "hostname for a named tunnel.",
+                    "Forward a loopback service through the tunnel. Quick links run their own connector and get a " +
+                        "unique trycloudflare.com URL; named links use the shared Zero Trust tunnel.",
                     style = MaterialTheme.typography.bodySmall,
                     color = TextMuted,
                 )
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ModeChoice(
+                        title = "Quick link",
+                        subtitle = "Own trycloudflare URL",
+                        selected = linkMode == TunnelLinks.MODE_QUICK,
+                        modifier = Modifier.weight(1f),
+                        onClick = { linkMode = TunnelLinks.MODE_QUICK },
+                    )
+                    ModeChoice(
+                        title = "Named link",
+                        subtitle = "Shared tunnel",
+                        selected = linkMode == TunnelLinks.MODE_NAMED,
+                        modifier = Modifier.weight(1f),
+                        onClick = { linkMode = TunnelLinks.MODE_NAMED },
+                    )
+                }
                 Spacer(Modifier.height(12.dp))
                 AppTextField(
                     value = name,
@@ -715,45 +803,54 @@ private fun LinkEditorDialog(
                     singleLine = true,
                     supportingText = "Loopback only: localhost, 127.0.0.1 or [::1].",
                 )
-                Spacer(Modifier.height(10.dp))
-                AppTextField(
-                    value = path,
-                    onValueChange = { path = it },
-                    label = "Public path",
-                    placeholder = "/site",
-                    singleLine = true,
-                    supportingText = "Works with quick tunnels. Leave blank when using a hostname only.",
-                )
-                Spacer(Modifier.height(10.dp))
-                AppTextField(
-                    value = host,
-                    onValueChange = { host = it },
-                    label = "Public hostname",
-                    placeholder = "site.example.com",
-                    singleLine = true,
-                    supportingText = "Named tunnels: point this hostname at the local tunnel router.",
-                )
-                Spacer(Modifier.height(6.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Strip public path", style = MaterialTheme.typography.bodyMedium, color = TextPrimary)
-                        Text(
-                            "Forward /site/page as /page to the local app.",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = TextMuted,
+                if (linkMode == TunnelLinks.MODE_NAMED) {
+                    Spacer(Modifier.height(10.dp))
+                    AppTextField(
+                        value = path,
+                        onValueChange = { path = it },
+                        label = "Public path",
+                        placeholder = "/site",
+                        singleLine = true,
+                        supportingText = "Optional on the main named hostname. Leave blank for hostname-only links.",
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    AppTextField(
+                        value = host,
+                        onValueChange = { host = it },
+                        label = "Public hostname",
+                        placeholder = "site.example.com",
+                        singleLine = true,
+                        supportingText = "Point this hostname at the local tunnel router in Zero Trust.",
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Strip public path", style = MaterialTheme.typography.bodyMedium, color = TextPrimary)
+                            Text(
+                                "Forward /site/page as /page to the local app.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = TextMuted,
+                            )
+                        }
+                        Switch(
+                            checked = stripPrefix,
+                            onCheckedChange = { stripPrefix = it },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = Brand,
+                                checkedBorderColor = Brand,
+                                uncheckedThumbColor = TextSecondary,
+                                uncheckedTrackColor = AppSurfaceHigh,
+                                uncheckedBorderColor = AppBorder,
+                            ),
                         )
                     }
-                    Switch(
-                        checked = stripPrefix,
-                        onCheckedChange = { stripPrefix = it },
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = Color.White,
-                            checkedTrackColor = Brand,
-                            checkedBorderColor = Brand,
-                            uncheckedThumbColor = TextSecondary,
-                            uncheckedTrackColor = AppSurfaceHigh,
-                            uncheckedBorderColor = AppBorder,
-                        ),
+                } else {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "The public URL is generated when the tunnel starts. Quick links need no path or domain.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextMuted,
                     )
                 }
                 if (error != null) {
@@ -777,6 +874,7 @@ private fun LinkEditorDialog(
                             target = target,
                             stripPrefix = stripPrefix,
                             enabled = initial?.enabled ?: true,
+                            mode = linkMode,
                         ),
                         existingId = initial?.id,
                         blockedPorts = blockedPorts,

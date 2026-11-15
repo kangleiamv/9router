@@ -9,9 +9,15 @@ import java.util.UUID
 /**
  * One local web service exposed through the tunnel.
  *
- * A link is matched either by public hostname (named tunnels with several
- * hostnames) or by a path prefix on the tunnel's main hostname (works with
- * quick tunnels). A link may use both, in which case both must match.
+ * [mode] decides how the link is published:
+ * - `quick`: the link owns an independent cloudflared quick tunnel and gets a
+ *   unique `trycloudflare.com` URL at its root. [host] and [path] are ignored.
+ * - `named`: the link is matched on the shared Zero Trust tunnel by public
+ *   hostname, path prefix, or both.
+ *
+ * An empty mode is resolved from [host] when stored links are read, so links
+ * created before per-link modes keep working: hostname links become named and
+ * path-only links become quick.
  */
 @Serializable
 data class TunnelLink(
@@ -22,6 +28,7 @@ data class TunnelLink(
     val target: String,
     val stripPrefix: Boolean = true,
     val enabled: Boolean = true,
+    val mode: String = "",
 )
 
 /** Unvalidated editor values. */
@@ -32,6 +39,7 @@ data class TunnelLinkDraft(
     val target: String = "",
     val stripPrefix: Boolean = true,
     val enabled: Boolean = true,
+    val mode: String = "quick",
 )
 
 data class TunnelRoute(
@@ -48,6 +56,8 @@ data class TunnelRoute(
 object TunnelLinks {
     const val SETTINGS_KEY = "tunnel_links"
     const val MAX_LINKS = 12
+    const val MODE_QUICK = "quick"
+    const val MODE_NAMED = "named"
 
     private val RESERVED = listOf(
         "/v1",
@@ -66,6 +76,7 @@ object TunnelLinks {
         return runCatching {
             Json.lenient.decodeFromString<List<TunnelLink>>(raw)
                 .filter { it.id.isNotBlank() && it.target.isNotBlank() }
+                .map { it.copy(mode = normalizeMode(it.mode, it.host)) }
                 .take(MAX_LINKS)
         }.getOrDefault(emptyList())
     }
@@ -81,10 +92,16 @@ object TunnelLinks {
         existingId: String? = null,
         blockedPorts: Set<Int> = emptySet(),
     ): TunnelLink {
-        val host = normalizeHost(draft.host)
-        val path = normalizePath(draft.path)
-        if (host.isEmpty() && path.isEmpty()) {
-            throw IllegalArgumentException("Add a public path (for a quick tunnel) or a public hostname.")
+        val mode = normalizeMode(draft.mode, draft.host)
+        // Quick links own a generated hostname, so stored host/path values are
+        // ignored (and not validated) in that mode.
+        val host = if (mode == MODE_NAMED) normalizeHost(draft.host) else ""
+        val path = if (mode == MODE_NAMED) normalizePath(draft.path) else ""
+        if (mode == MODE_NAMED && host.isEmpty() && path.isEmpty()) {
+            throw IllegalArgumentException(
+                "Named links need a public path or a public hostname. " +
+                    "Choose Quick tunnel to get a generated trycloudflare.com URL instead.",
+            )
         }
         val target = normalizeTarget(draft.target)
             ?: throw IllegalArgumentException(
@@ -99,14 +116,33 @@ object TunnelLinks {
         }
         return TunnelLink(
             id = existingId?.takeIf { it.isNotBlank() } ?: newId(),
-            name = draft.name.trim().ifBlank { host.ifBlank { path } },
+            name = draft.name.trim().ifBlank {
+                when {
+                    host.isNotBlank() -> host
+                    path.isNotBlank() -> path
+                    else -> "Local link"
+                }
+            },
             host = host,
             path = path,
             target = target,
             stripPrefix = draft.stripPrefix,
             enabled = draft.enabled,
+            mode = mode,
         )
     }
+
+    /** Resolve an explicit or legacy link mode. */
+    fun normalizeMode(raw: String, host: String = ""): String = when (raw.trim().lowercase()) {
+        MODE_NAMED, "token" -> MODE_NAMED
+        MODE_QUICK -> MODE_QUICK
+        else -> if (host.isNotBlank()) MODE_NAMED else MODE_QUICK
+    }
+
+    /** Effective mode for a stored link, including links saved before modes existed. */
+    fun modeOf(link: TunnelLink): String = normalizeMode(link.mode, link.host)
+
+    fun isQuick(link: TunnelLink): Boolean = modeOf(link) == MODE_QUICK
 
     /** Normalize a public hostname. Blank means "match by path only". */
     fun normalizeHost(raw: String): String {
@@ -222,15 +258,35 @@ object TunnelLinks {
     }
 
     /**
-     * Pick the best link for a request. Host matches win, then the longest
-     * matching path. Path links never shadow the gateway's reserved routes.
+     * Pick the best link for a request. A quick link matched by its generated
+     * hostname owns that whole hostname. Named links are matched by hostname,
+     * then by the longest path prefix, and never shadow gateway routes.
      */
-    fun match(links: List<TunnelLink>, hostHeader: String?, rawUri: String): TunnelRoute? {
+    fun match(
+        links: List<TunnelLink>,
+        hostHeader: String?,
+        rawUri: String,
+        quickHosts: Map<String, String> = emptyMap(),
+    ): TunnelRoute? {
         val host = hostFromHeader(hostHeader)
         val path = rawUri.substringBefore('?').ifBlank { "/" }
         val enabled = links.filter { it.enabled }
 
-        val byHost = enabled
+        if (host.isNotBlank()) {
+            val quickId = quickHosts[host]
+            if (quickId != null) {
+                val quick = enabled.firstOrNull { it.id == quickId && isQuick(it) }
+                if (quick != null) {
+                    // The dedicated quick hostname serves the link at its root;
+                    // stored path/host values do not participate in routing.
+                    val routed = quick.copy(path = "", stripPrefix = false)
+                    return TunnelRoute(routed, forwardUrl(routed, rawUri))
+                }
+            }
+        }
+
+        val named = enabled.filter { !isQuick(it) }
+        val byHost = named
             .filter { it.host.isNotBlank() && it.host == host }
             .filter { it.path.isBlank() || pathMatches(it.path, path) }
             .maxByOrNull { it.path.length }
@@ -239,7 +295,7 @@ object TunnelLinks {
         }
 
         if (isReserved(path)) return null
-        val byPath = enabled
+        val byPath = named
             .filter { it.host.isBlank() && it.path.isNotBlank() && pathMatches(it.path, path) }
             .maxByOrNull { it.path.length }
         return byPath?.let { TunnelRoute(it, forwardUrl(it, rawUri)) }
@@ -274,10 +330,12 @@ object TunnelLinks {
     }
 
     /**
-     * Public URL shown for a link. Named tunnels prefer the configured
-     * hostname; quick tunnels use the generated trycloudflare host plus path.
+     * Public URL shown for a named link on the shared tunnel. Quick links are
+     * served from their own generated hostname, which the UI reads from
+     * [LinkTunnelRuntime] instead.
      */
     fun publicUrl(root: String, mode: String, link: TunnelLink): String {
+        if (isQuick(link)) return ""
         val suffix = if (link.path.isNotBlank()) "${link.path}/" else ""
         if (mode == "token" && link.host.isNotBlank()) {
             return "https://${link.host}$suffix"
@@ -297,7 +355,7 @@ object TunnelLinks {
         val value = location.trim()
         if (value.isEmpty() || value.startsWith("//")) return value
         val uri = runCatching { URI(value) }.getOrNull() ?: return value
-        val prefix = if (link.stripPrefix && link.path.isNotBlank()) link.path else ""
+        val prefix = if (!isQuick(link) && link.stripPrefix && link.path.isNotBlank()) link.path else ""
         val query = uri.rawQuery?.let { "?$it" }.orEmpty()
         val fragment = uri.rawFragment?.let { "#$it" }.orEmpty()
 
@@ -323,7 +381,7 @@ object TunnelLinks {
     /** Lines describing the Zero Trust hostname -> local service mapping. */
     fun ingressSummary(links: List<TunnelLink>, publicPort: Int): String {
         val router = "http://127.0.0.1:$publicPort"
-        return links.filter { it.enabled && it.host.isNotBlank() }
+        return links.filter { it.enabled && !isQuick(it) && it.host.isNotBlank() }
             .joinToString("\n") { link ->
                 "${link.host}  ->  $router${if (link.path.isNotBlank()) link.path else ""}"
             }

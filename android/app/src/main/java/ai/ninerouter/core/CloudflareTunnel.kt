@@ -118,19 +118,28 @@ object TunnelPorts {
  *
  * Cloudflared points at a restricted loopback server (see KtorProxyServer's
  * public module), never at the full management API.
+ *
+ * More than one connector can run at once: the gateway owns [GATEWAY_ID] and
+ * each quick local link owns its own quick tunnel instance. Every instance has
+ * independent generation, process and log state.
  */
 object CloudflareTunnel {
+    const val GATEWAY_ID = "gateway"
+
     private const val BINARY_NAME = "libcloudflared.so"
     private const val MIN_BINARY_BYTES = 1_000_000L
     private const val CONNECT_TIMEOUT_MS = 120_000L
     private const val MAX_LOG_LINES = 120
 
+    private class Instance(var sink: TunnelStateSink) {
+        var process: Process? = null
+        var generation: Int = 0
+        var monitor: Job? = null
+    }
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val lock = Any()
-
-    private var process: Process? = null
-    private var generation = 0
-    private var monitor: Job? = null
+    private val instances = mutableMapOf<String, Instance>()
 
     /** Path of the packaged binary, or null when this ABI has no binary. */
     fun binaryFile(context: Context): File? {
@@ -142,33 +151,59 @@ object CloudflareTunnel {
         return candidates.firstOrNull { it.isFile && it.length() > MIN_BINARY_BYTES }
     }
 
+    /** Start (or restart) the gateway connector. */
     fun start(context: Context, options: TunnelOptions) {
+        startInstance(GATEWAY_ID, context, options, TunnelRuntime)
+    }
+
+    /** Stop the gateway connector; quick link connectors are stopped separately. */
+    fun stop() = stopInstance(GATEWAY_ID)
+
+    fun fail(message: String) = TunnelRuntime.fail(message)
+
+    internal fun startInstance(
+        id: String,
+        context: Context,
+        options: TunnelOptions,
+        sink: TunnelStateSink,
+    ) {
         val app = context.applicationContext
         var gen = 0
         var previous: Process? = null
         synchronized(lock) {
-            generation += 1
-            gen = generation
-            previous = process
-            process = null
-            monitor?.cancel()
-            monitor = null
+            val instance = instances.getOrPut(id) { Instance(sink) }
+            instance.sink = sink
+            instance.generation += 1
+            gen = instance.generation
+            previous = instance.process
+            instance.process = null
+            instance.monitor?.cancel()
+            instance.monitor = null
         }
-        TunnelRuntime.begin(options.mode, options.localPort, options.hostname)
+        sink.begin(options.mode, options.localPort, options.hostname)
         previous?.let { killAsync(it) }
-        monitor = scope.launch { run(app, options, gen) }
+        val monitor = scope.launch { run(id, app, options, gen, sink) }
+        synchronized(lock) {
+            val instance = instances[id]
+            if (instance != null && instance.generation == gen) {
+                instance.monitor = monitor
+            }
+        }
     }
 
-    fun stop() {
+    internal fun stopInstance(id: String) {
         var previous: Process? = null
+        var sink: TunnelStateSink? = null
         synchronized(lock) {
-            generation += 1
-            previous = process
-            process = null
-            monitor?.cancel()
-            monitor = null
+            val instance = instances[id] ?: return
+            instance.generation += 1
+            previous = instance.process
+            sink = instance.sink
+            instance.process = null
+            instance.monitor?.cancel()
+            instance.monitor = null
         }
-        TunnelRuntime.stopped()
+        sink?.stopped()
         previous?.let { proc ->
             scope.launch {
                 runCatching { proc.destroy() }
@@ -179,7 +214,37 @@ object CloudflareTunnel {
         }
     }
 
-    fun fail(message: String) = TunnelRuntime.fail(message)
+    internal fun stopAll() {
+        val ids = synchronized(lock) { instances.keys.toList() }
+        ids.forEach(::stopInstance)
+    }
+
+    private fun isCurrent(id: String, gen: Int): Boolean = synchronized(lock) {
+        instances[id]?.generation == gen
+    }
+
+    /** Report a startup failure only if this attempt was not superseded. */
+    private fun failIfCurrent(id: String, gen: Int, message: String) {
+        synchronized(lock) {
+            val instance = instances[id] ?: return
+            if (instance.generation != gen) return
+            instance.sink.fail(message)
+        }
+    }
+
+    private fun attachProcess(id: String, gen: Int, proc: Process): Boolean = synchronized(lock) {
+        val instance = instances[id] ?: return@synchronized false
+        if (instance.generation != gen) return@synchronized false
+        instance.process = proc
+        true
+    }
+
+    private fun detachProcess(id: String, gen: Int) {
+        synchronized(lock) {
+            val instance = instances[id] ?: return
+            if (instance.generation == gen) instance.process = null
+        }
+    }
 
     private fun killAsync(proc: Process) {
         scope.launch {
@@ -190,42 +255,56 @@ object CloudflareTunnel {
         }
     }
 
-    private suspend fun run(context: Context, options: TunnelOptions, gen: Int) {
+    private suspend fun run(
+        id: String,
+        context: Context,
+        options: TunnelOptions,
+        gen: Int,
+        sink: TunnelStateSink,
+    ) {
         val binary = binaryFile(context)
         if (binary == null) {
-            TunnelRuntime.fail(
+            failIfCurrent(
+                id,
+                gen,
                 "cloudflared is not bundled for ${Build.SUPPORTED_ABIS.firstOrNull() ?: "this ABI"}. " +
                     "Install the arm64 build of 9Router Android.",
             )
             return
         }
         TunnelAssets.verifyAndroidPie(binary)?.let { reason ->
-            TunnelRuntime.fail("$reason Reinstall 9Router Android.")
+            failIfCurrent(id, gen, "$reason Reinstall 9Router Android.")
             return
         }
         if (!binary.canExecute()) {
             runCatching { binary.setExecutable(true) }
         }
         if (!binary.canExecute()) {
-            TunnelRuntime.fail(
+            failIfCurrent(
+                id,
+                gen,
                 "cloudflared is not executable in this install. Reinstall 9Router Android.",
             )
             return
         }
 
-        TunnelRuntime.update { it.copy(message = "Preparing the Android connector…") }
+        sink.update { it.copy(message = "Preparing the Android connector…") }
         val caFile = TunnelAssets.prepareCaBundle(context).getOrElse { error ->
-            TunnelRuntime.fail(
+            failIfCurrent(
+                id,
+                gen,
                 error.message ?: "Could not prepare the bundled CA store.",
             )
             return
         }
+        if (!isCurrent(id, gen)) return
 
         val workingDir = File(context.filesDir, "cloudflared").apply { mkdirs() }
         val configPath = if (options.mode == TunnelCommand.MODE_TOKEN) {
             null
         } else {
-            File(workingDir, "quick-tunnel.yml").apply {
+            val safeId = id.replace(Regex("[^a-zA-Z0-9_-]"), "_")
+            File(workingDir, "quick-tunnel-$safeId.yml").apply {
                 writeText("# 9Router quick tunnel\n", Charsets.UTF_8)
             }.absolutePath
         }
@@ -247,18 +326,15 @@ object CloudflareTunnel {
         val proc = try {
             builder.start()
         } catch (t: Throwable) {
-            TunnelRuntime.fail("Could not start cloudflared: ${t.message ?: t.javaClass.simpleName}")
+            failIfCurrent(id, gen, "Could not start cloudflared: ${t.message ?: t.javaClass.simpleName}")
             return
         }
 
-        synchronized(lock) {
-            if (gen != generation) {
-                runCatching { proc.destroy() }
-                return
-            }
-            process = proc
+        if (!attachProcess(id, gen, proc)) {
+            runCatching { proc.destroy() }
+            return
         }
-        TunnelRuntime.update { it.copy(processAlive = true, message = "Connecting to Cloudflare…") }
+        sink.update { it.copy(processAlive = true, message = "Connecting to Cloudflare…") }
 
         val logLines = ArrayList<String>()
         val quickUrl = CompletableDeferred<String>()
@@ -268,12 +344,12 @@ object CloudflareTunnel {
             try {
                 proc.inputStream.bufferedReader().useLines { lines ->
                     for (raw in lines) {
-                        if (gen != generation) break
+                        if (!isCurrent(id, gen)) break
                         val line = TunnelLog.stripAnsi(raw)
                         if (line.isBlank()) continue
                         logLines += line
                         while (logLines.size > MAX_LOG_LINES) logLines.removeAt(0)
-                        TunnelRuntime.update { it.copy(logTail = logLines.toList()) }
+                        sink.update { it.copy(logTail = logLines.toList()) }
 
                         if (options.mode == TunnelCommand.MODE_QUICK) {
                             TunnelLog.quickTunnelUrl(line)?.let { url ->
@@ -282,8 +358,8 @@ object CloudflareTunnel {
                         }
                         if (TunnelLog.isRegistered(line)) {
                             if (!registered.isCompleted) registered.complete(Unit)
-                            if (TunnelRuntime.state.value.status == TunnelStatus.RUNNING) {
-                                TunnelRuntime.update { it.copy(message = "Cloudflare tunnel is live.") }
+                            if (sink.status == TunnelStatus.RUNNING) {
+                                sink.update { it.copy(message = "Cloudflare tunnel is live.") }
                             }
                         }
                     }
@@ -304,19 +380,20 @@ object CloudflareTunnel {
             false
         }
 
-        if (gen != generation) {
+        if (!isCurrent(id, gen)) {
             reader.cancel()
             return
         }
         val connectedInTime = if (options.mode == TunnelCommand.MODE_QUICK) quickPublicUrl != null else tokenConnected
         if (!connectedInTime) {
             synchronized(lock) {
-                if (gen == generation) generation += 1
-                if (process === proc) process = null
+                val instance = instances[id]
+                if (instance != null && instance.generation == gen) instance.generation += 1
+                if (instance?.process === proc) instance.process = null
             }
             runCatching { proc.destroy() }
             reader.cancel()
-            TunnelRuntime.fail(
+            sink.fail(
                 "Cloudflare did not connect within ${CONNECT_TIMEOUT_MS / 1000}s. " +
                     "Check the network and cloudflared log below." +
                     logTailSuffix(logLines),
@@ -329,7 +406,7 @@ object CloudflareTunnel {
         } else {
             TunnelLog.publicUrlForHostname(options.hostname)
         }
-        TunnelRuntime.connected(
+        sink.connected(
             publicUrl = publicUrl,
             message = if (publicUrl.isBlank()) {
                 "Named tunnel connected. Add a public hostname in the Cloudflare dashboard."
@@ -340,13 +417,14 @@ object CloudflareTunnel {
 
         val exitCode = withContext(Dispatchers.IO) { proc.waitFor() }
         runCatching { reader.join() }
-        if (gen != generation) return
+        if (!isCurrent(id, gen)) return
 
+        detachProcess(id, gen)
         synchronized(lock) {
-            if (process === proc) process = null
-            if (gen == generation) generation += 1
+            val instance = instances[id]
+            if (instance != null && instance.generation == gen) instance.generation += 1
         }
-        TunnelRuntime.fail(
+        sink.fail(
             "cloudflared exited (code $exitCode)." + logTailSuffix(logLines),
         )
     }

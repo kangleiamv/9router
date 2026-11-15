@@ -1,6 +1,7 @@
 package ai.ninerouter.service.server
 
 import ai.ninerouter.core.AppRepository
+import ai.ninerouter.core.LinkTunnelRuntime
 import ai.ninerouter.core.TunnelLinks
 import ai.ninerouter.core.TunnelRoute
 import io.ktor.http.ContentType
@@ -96,6 +97,7 @@ internal object TunnelProxy {
                 links,
                 call.request.headers[HttpHeaders.Host],
                 call.request.uri,
+                LinkTunnelRuntime.hosts.value,
             ) ?: return@intercept
             forward(call, route)
             finish()
@@ -234,6 +236,7 @@ internal object TunnelProxy {
             links,
             call.request.headers[HttpHeaders.Host],
             call.request.uri,
+            LinkTunnelRuntime.hosts.value,
         )
         if (route == null) {
             close(CloseReason(CloseReason.Codes.CANNOT_ACCEPT, "No tunnel link for this path"))

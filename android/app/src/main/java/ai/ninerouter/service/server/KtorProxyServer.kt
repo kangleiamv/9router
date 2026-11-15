@@ -165,6 +165,7 @@ object KtorProxyServer {
                             links.filter { it.enabled }.forEach { link ->
                                 add(buildJsonObject {
                                     put("name", link.name)
+                                    put("mode", TunnelLinks.modeOf(link))
                                     put("path", link.path)
                                     put("host", link.host)
                                 })

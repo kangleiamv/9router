@@ -5,7 +5,10 @@ import ai.ninerouter.R
 import ai.ninerouter.core.AppContainer
 import ai.ninerouter.core.AppRepository
 import ai.ninerouter.core.CloudflareTunnel
+import ai.ninerouter.core.LinkTunnelManager
+import ai.ninerouter.core.LinkTunnelRuntime
 import ai.ninerouter.core.ProxyRuntime
+import ai.ninerouter.core.TunnelLinks
 import ai.ninerouter.core.TunnelOptions
 import ai.ninerouter.core.TunnelPorts
 import ai.ninerouter.core.TunnelRuntime
@@ -29,6 +32,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -38,6 +42,8 @@ class ProxyForegroundService : Service() {
         const val ACTION_STOP = "ai.ninerouter.action.STOP"
         const val ACTION_START_TUNNEL = "ai.ninerouter.action.START_TUNNEL"
         const val ACTION_STOP_TUNNEL = "ai.ninerouter.action.STOP_TUNNEL"
+        const val ACTION_SYNC_LINKS = "ai.ninerouter.action.SYNC_LINKS"
+        const val EXTRA_LINK_ID = "ai.ninerouter.extra.LINK_ID"
         const val CHANNEL_ID = "ninerouter_proxy"
         const val NOTIFICATION_ID = 9001
 
@@ -67,6 +73,15 @@ class ProxyForegroundService : Service() {
                 action = ACTION_STOP_TUNNEL
             }
             runCatching { context.startService(intent) }
+        }
+
+        /** Reconcile quick link connectors after a link is added, edited or removed. */
+        fun syncLinks(context: Context, linkId: String? = null) {
+            val intent = Intent(context, ProxyForegroundService::class.java).apply {
+                action = ACTION_SYNC_LINKS
+                if (!linkId.isNullOrBlank()) putExtra(EXTRA_LINK_ID, linkId)
+            }
+            runCatching { ContextCompat.startForegroundService(context, intent) }
         }
     }
 
@@ -110,6 +125,14 @@ class ProxyForegroundService : Service() {
                         }
                     }
                     startTunnelInternal(port)
+                }
+                START_STICKY
+            }
+
+            ACTION_SYNC_LINKS -> {
+                startForegroundIfNeeded()
+                scope.launch {
+                    syncLinksInternal(intent.getStringExtra(EXTRA_LINK_ID))
                 }
                 START_STICKY
             }
@@ -169,12 +192,7 @@ class ProxyForegroundService : Service() {
         val mode = settings["tunnel_mode"]?.takeIf { it == "token" } ?: "quick"
         val token = Crypto.decrypt(settings["tunnel_token"]).orEmpty()
         val hostname = settings["tunnel_hostname"].orEmpty()
-
-        if (mode == "token" && token.isBlank()) {
-            CloudflareTunnel.fail("Add a Cloudflare tunnel token before starting a named tunnel.")
-            notify("Tunnel error: token is missing")
-            return
-        }
+        val links = TunnelLinks.decode(settings[TunnelLinks.SETTINGS_KEY])
 
         val publicPort = TunnelPorts.publicPort(proxyPort)
         val listener = withContext(Dispatchers.IO) {
@@ -186,7 +204,17 @@ class ProxyForegroundService : Service() {
             return
         }
 
+        // Quick link connectors are independent of the gateway connector, so
+        // they still start when the named gateway token is missing.
+        LinkTunnelManager.sync(this, links, publicPort)
         observeTunnel()
+
+        if (mode == "token" && token.isBlank()) {
+            CloudflareTunnel.fail("Add a Cloudflare tunnel token before starting a named tunnel.")
+            notify("Tunnel error: token is missing")
+            return
+        }
+
         CloudflareTunnel.start(
             this,
             TunnelOptions(
@@ -198,25 +226,66 @@ class ProxyForegroundService : Service() {
         )
     }
 
+    /** Apply link edits without restarting the gateway connector or its URL. */
+    private suspend fun syncLinksInternal(restartLinkId: String?) {
+        val settings = runCatching { repo.settingsMap() }.getOrDefault(emptyMap())
+        if (settings["tunnel_enabled"] != "true") return
+
+        if (!KtorProxyServer.isRunning) {
+            ensureGateway(currentPort())
+        }
+        val proxyPort = currentPort()
+        val publicPort = TunnelPorts.publicPort(proxyPort)
+        if (!KtorProxyServer.isPublicRunning) {
+            val started = withContext(Dispatchers.IO) {
+                KtorProxyServer.startPublicServer(publicPort, repo)
+            }
+            if (!started) {
+                notify("Tunnel error: public listener failed")
+                return
+            }
+        }
+        observeTunnel()
+
+        val links = TunnelLinks.decode(settings[TunnelLinks.SETTINGS_KEY])
+        val restart = restartLinkId?.let { id -> links.firstOrNull { it.id == id } }
+        if (restart != null) {
+            LinkTunnelManager.restart(this, restart, publicPort)
+        } else {
+            LinkTunnelManager.sync(this, links, publicPort)
+        }
+    }
+
     private fun stopTunnelInternal() {
         tunnelObserver?.cancel()
         tunnelObserver = null
+        LinkTunnelManager.stopAll()
         CloudflareTunnel.stop()
         KtorProxyServer.stopPublicServer()
     }
 
-    /** Keep the ongoing notification in sync with the connector state. */
+    /** Keep the ongoing notification in sync with the gateway and link state. */
     private fun observeTunnel() {
         if (tunnelObserver != null) return
         tunnelObserver = scope.launch {
-            TunnelRuntime.state.collect { state ->
+            combine(TunnelRuntime.state, LinkTunnelRuntime.states) { gateway, links ->
+                gateway to links
+            }.collect { (state, links) ->
                 val tunnel = when (state.status) {
                     TunnelStatus.RUNNING -> state.publicUrl.ifBlank { "named tunnel connected" }
                     TunnelStatus.STARTING -> "starting…"
                     TunnelStatus.ERROR -> "error: ${state.message}"
                     TunnelStatus.STOPPED -> "off"
                 }
-                notify("http://127.0.0.1:${currentPort()} · Tunnel: $tunnel")
+                val quick = if (links.isEmpty()) {
+                    ""
+                } else {
+                    val running = links.values.count { it.status == TunnelStatus.RUNNING }
+                    val failed = links.values.count { it.status == TunnelStatus.ERROR }
+                    " · Quick links: $running/${links.size}" +
+                        if (failed > 0) " ($failed failed)" else ""
+                }
+                notify("http://127.0.0.1:${currentPort()} · Tunnel: $tunnel$quick")
             }
         }
     }

@@ -3,6 +3,7 @@ package ai.ninerouter.ui
 import ai.ninerouter.core.AppContainer
 import ai.ninerouter.core.CompatibleProbe
 import ai.ninerouter.core.DashboardStats
+import ai.ninerouter.core.LinkTunnelRuntime
 import ai.ninerouter.core.ProxyRuntime
 import ai.ninerouter.core.ProviderUsage
 import ai.ninerouter.core.TunnelLink
@@ -87,6 +88,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val port: StateFlow<Int> = ProxyRuntime.port
     val lastError: StateFlow<String?> = ProxyRuntime.lastError
     val tunnelState: StateFlow<TunnelState> = TunnelRuntime.state
+    val linkTunnels: StateFlow<Map<String, TunnelState>> = LinkTunnelRuntime.states
 
     private val _busy = MutableStateFlow<Set<String>>(emptySet())
     val busy: StateFlow<Set<String>> = _busy.asStateFlow()
@@ -237,6 +239,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Persist a validated local link. The public listener reads it per request. */
     fun saveTunnelLink(link: TunnelLink) {
+        val context = getApplication<Application>()
         viewModelScope.launch {
             runCatching {
                 val port = ProxyRuntime.port.value
@@ -248,6 +251,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         target = link.target,
                         stripPrefix = link.stripPrefix,
                         enabled = link.enabled,
+                        mode = link.mode,
                     ),
                     existingId = link.id,
                     blockedPorts = setOf(port, TunnelPorts.publicPort(port)),
@@ -264,11 +268,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 repo.putSetting(TunnelLinks.SETTINGS_KEY, TunnelLinks.encode(next))
                 refreshSettings()
+                ProxyForegroundService.syncLinks(context)
             }.onFailure { emit(it.message ?: "Could not save the local link", true) }
         }
     }
 
     fun deleteTunnelLink(id: String) {
+        val context = getApplication<Application>()
         viewModelScope.launch {
             runCatching {
                 val current = TunnelLinks.decode(repo.getSetting(TunnelLinks.SETTINGS_KEY))
@@ -277,11 +283,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     TunnelLinks.encode(current.filterNot { it.id == id }),
                 )
                 refreshSettings()
+                ProxyForegroundService.syncLinks(context)
             }.onFailure { emit(it.message ?: "Could not delete the local link", true) }
         }
     }
 
     fun setTunnelLinkEnabled(id: String, enabled: Boolean) {
+        val context = getApplication<Application>()
         viewModelScope.launch {
             runCatching {
                 val current = TunnelLinks.decode(repo.getSetting(TunnelLinks.SETTINGS_KEY))
@@ -290,8 +298,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     TunnelLinks.encode(current.map { if (it.id == id) it.copy(enabled = enabled) else it }),
                 )
                 refreshSettings()
+                ProxyForegroundService.syncLinks(context)
             }.onFailure { emit(it.message ?: "Could not update the local link", true) }
         }
+    }
+
+    /** Restart one quick link connector without touching the gateway tunnel. */
+    fun restartTunnelLink(id: String) {
+        val context = getApplication<Application>()
+        ProxyForegroundService.syncLinks(context, id)
+        emit("Restarting the quick link…")
     }
 
     fun saveSettingsAndRestart(values: Map<String, String>) {

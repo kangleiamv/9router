@@ -37,6 +37,7 @@ class TunnelProxyTest {
         name = "Test",
         path = "/site",
         target = target,
+        mode = TunnelLinks.MODE_NAMED,
     )
 
     @Test

@@ -171,7 +171,7 @@ class HostingTest {
         val init = plan.init!!
         assertEquals(File("/data/usr/bin/mariadbd"), init.program)
         assertTrue(init.args.contains("--bootstrap"))
-        assertEquals(File(layout.data, "mysql"), init.skipIfExists)
+        assertEquals(File(layout.data, "mariadb_upgrade_info"), init.skipIfExists)
         assertEquals(File(layout.data, "mariadb_upgrade_info"), init.marker)
         assertTrue(init.prelude.contains("SET @auth_root_socket=NULL;"))
         assertEquals(6, init.scripts.size)

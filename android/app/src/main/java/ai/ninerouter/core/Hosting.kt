@@ -373,6 +373,9 @@ object HostingPlanner {
         return when (spec.id) {
             "php" -> {
                 env["DOCUMENT_ROOT"] = layout.content.absolutePath
+                // The CLI server forks workers on Linux; a single request must
+                // not block the whole site.
+                env["PHP_CLI_SERVER_WORKERS"] = "4"
                 HostingPlan(
                     program = bin(spec.binaries),
                     args = listOf(
@@ -550,9 +553,11 @@ object HostingPlanner {
                             appendLine("use mysql;")
                             appendLine("SET @auth_root_socket=NULL;")
                         },
-                        skipIfExists = File(layout.data, "mysql"),
-                        marker = File(layout.data, "mariadb_upgrade_info"),
-                        markerText = MARIA_UPGRADE_INFO,
+                        // The marker is only written after a complete bootstrap,
+                        // so a half-initialized data folder is retried.
+                        skipIfExists = File(layout.data, MARIA_UPGRADE_INFO_FILE),
+                        marker = File(layout.data, MARIA_UPGRADE_INFO_FILE),
+                        markerText = MARIADB_UPGRADE_INFO,
                     ),
                 )
             }
@@ -561,7 +566,9 @@ object HostingPlanner {
         }
     }
 
-    private const val MARIA_UPGRADE_INFO = "13.0.2-MariaDB"
+    /** Written into a MariaDB data folder after a successful bootstrap. */
+    const val MARIADB_UPGRADE_INFO = "13.0.2-MariaDB"
+    const val MARIA_UPGRADE_INFO_FILE = "mariadb_upgrade_info"
 
     private val MARIA_BOOTSTRAP_FILES = listOf(
         "mariadb_system_tables.sql",

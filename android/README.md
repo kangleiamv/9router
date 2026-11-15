@@ -68,10 +68,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.13>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.14>.
 
 ```bash
-adb install -r 9router-android-1.3.13-debug.apk
+adb install -r 9router-android-1.3.14-debug.apk
 ```
 
 The APK is about 98 MB because it carries the arm64 hosting runtimes. It builds
@@ -399,7 +399,8 @@ MySQL processes. Each service gets an app-owned folder under
 `files/hosting/<id>` with `public` for web content, `data` for database files,
 and `home`, `tmp` and `logs` beside them.
 
-- **PHP** — `php -S 127.0.0.1:<port> -t <public>` plus a starter `index.php`.
+- **PHP** — `php -S 127.0.0.1:<port> -t <public>` with four CLI-server workers
+  and a starter `index.php`.
 - **Node.js** — `node server.js` with `PORT`, `HOST=127.0.0.1` and `DOCROOT`,
   plus a small static `server.js`. Set an entrypoint to run your own file.
 - **Python** — `python3 -m http.server <port> --bind 127.0.0.1 --directory
@@ -411,7 +412,21 @@ and `home`, `tmp` and `logs` beside them.
   password file is deleted once `initdb` finishes.
 - **MySQL / MariaDB** — the bundled SQL bootstrap scripts are streamed to
   `mariadbd --bootstrap` once, then `mariadbd` binds `127.0.0.1` with an `app`
-  database and a generated user and password.
+  database and a generated user and password. A folder left behind by a failed
+  bootstrap is cleared so the next start can initialize cleanly.
+
+Each service row also shows its **storage**: the size of its code, database and
+log folders plus the free space left on the device, and a **Files** button that
+opens the code folder (`files/hosting/<id>/public`) in a small file manager:
+
+- browse folders, open a text or code file in the in-app editor and save it;
+- upload a file with the system picker (up to 64 MB);
+- create a folder, delete a file or folder, then serve it immediately from the
+  running runtime.
+
+Uploads and edits are written through a temporary sibling file, so a crash
+cannot truncate a served file. Paths are resolved below the service folder and
+`..`, absolute paths and symlink escapes are refused.
 
 Processes bind loopback only and are supervised: output is captured (the card
 shows the tail), an unexpected exit restarts up to three times with a backoff,
@@ -485,6 +500,8 @@ that the bundled runtime is missing, and only PATH runtimes can start.
   responses report upstream usage when the provider returns it.
 - Android may stop the foreground service under extreme battery pressure; the
   boot receiver re-arms it when auto-start is enabled.
+- Hosted services bind IPv4 `127.0.0.1`. Port probes use the same address,
+  because Android's `InetAddress.getLoopbackAddress()` returns IPv6 `::1`.
 - OAuth sign-in uses the system browser and a random loopback port; no Google
   or Anthropic password ever reaches the app. Tokens are stored encrypted and
   refreshed automatically before they expire.

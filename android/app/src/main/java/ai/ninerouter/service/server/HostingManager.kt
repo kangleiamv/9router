@@ -43,6 +43,11 @@ object HostingManager {
     private const val PORT_TIMEOUT_MS = 250
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /** Hosted services bind IPv4 loopback; probe the same address. */
+    private val loopback: InetAddress by lazy {
+        runCatching { InetAddress.getByName("127.0.0.1") }
+            .getOrElse { InetAddress.getLoopbackAddress() }
+    }
     private val lock = Any()
     private val running = mutableMapOf<String, Run>()
     private val stopping = mutableSetOf<String>()
@@ -103,16 +108,28 @@ object HostingManager {
         if (name.startsWith("lib") && name.endsWith(".so")) listOf(name)
         else listOf(name, "lib$name.so")
 
+    private fun locate(context: Context, dirs: List<File>, name: String): File? {
+        val nativeDir = context.applicationInfo?.nativeLibraryDir?.let(::File)
+        for (dir in dirs) {
+            for (candidate in candidates(name)) {
+                val file = File(dir, candidate)
+                if (!file.isFile) continue
+                if (file.canExecute()) return file
+                // Android extracts native libraries as executable. If a vendor
+                // mount makes the probe inconclusive, try the owner bit and
+                // keep a native library anyway; exec reports the real error.
+                runCatching { file.setExecutable(true, true) }
+                if (file.canExecute() || dir == nativeDir) return file
+            }
+        }
+        return null
+    }
+
     /** Absolute binaries for [spec], keyed by their command name. */
     fun resolve(context: Context, spec: HostedKind): Map<String, File> {
         val dirs = searchDirs(context)
         return (spec.binaries + spec.setupBinaries).mapNotNull { name ->
-            val found = dirs.firstNotNullOfOrNull { dir ->
-                candidates(name).firstNotNullOfOrNull { candidate ->
-                    File(dir, candidate).let { if (it.isFile && it.canExecute()) it else null }
-                }
-            }
-            found?.let { name to it }
+            locate(context, dirs, name)?.let { name to it }
         }.toMap()
     }
 
@@ -155,7 +172,7 @@ object HostingManager {
      */
     private fun ensureRuntimeAssets(context: Context, spec: HostedKind, layout: HostLayout) {
         if (spec.id !in setOf("postgres", "mysql")) return
-        val marker = File(layout.runtime, ".assets")
+        val marker = File(layout.runtime, ".assets-${spec.id}")
         if (marker.isFile && marker.readText().trim() == RUNTIME_ASSETS + "-" + spec.id) {
             ensureRuntimeDirs(spec, layout)
             return
@@ -188,6 +205,9 @@ object HostingManager {
         }
         if (spec.id == "mysql") {
             File(layout.runtime, "share/mariadb").mkdirs()
+            // mariadbd looks plugins up here; an absent directory is a warning,
+            // an empty one is quieter.
+            File(layout.runtime, "lib/mysql/plugin").mkdirs()
         }
     }
 
@@ -203,6 +223,40 @@ object HostingManager {
         }
         target.mkdirs()
         children.forEach { child -> copyAssetTree(context, "$assetPath/$child", File(target, child)) }
+    }
+
+    /**
+     * A failed `initdb` or `--bootstrap` leaves files that the next run refuses
+     * to reuse. Only clear a folder that has no completion marker; a valid
+     * data directory always carries one.
+     */
+    private fun prepareDataDir(layout: HostLayout, spec: HostedKind) {
+        when (spec.id) {
+            "postgres" -> {
+                if (File(layout.data, "PG_VERSION").exists()) {
+                    restrict(layout.data)
+                    return
+                }
+            }
+
+            "mysql" -> {
+                val marker = File(layout.data, HostingPlanner.MARIA_UPGRADE_INFO_FILE)
+                if (marker.exists()) {
+                    restrict(layout.data)
+                    return
+                }
+                // Data folder from an installer that predates the marker.
+                if (File(layout.data, "mysql").isDirectory && File(layout.data, "ibdata1").isFile) {
+                    marker.writeText(HostingPlanner.MARIADB_UPGRADE_INFO)
+                    restrict(layout.data)
+                    return
+                }
+            }
+
+            else -> return
+        }
+        layout.data.listFiles()?.forEach { runCatching { it.deleteRecursively() } }
+        restrict(layout.data)
     }
 
     /** Owner-only directory, required by PostgreSQL for its data directory. */
@@ -254,8 +308,11 @@ object HostingManager {
                     searchDirs = searchDirs(app),
                 )
                 if (spec.id == "postgres" || spec.id == "mysql") {
-                    restrict(layout.data)
                     restrict(File(layout.root, "run"))
+                    prepareDataDir(layout, spec)
+                }
+                if (!plan.program.canExecute()) {
+                    runCatching { plan.program.setExecutable(true, true) }
                 }
                 if (execBlocked(app, plan.program)) {
                     throw IllegalStateException(
@@ -287,8 +344,30 @@ object HostingManager {
                 }
                 plan.init?.let { init ->
                     val skip = init.skipIfExists
-                    if (skip == null || !skip.exists()) {
-                        runBootstrap(init, plan.env, plan.workDir, service.id)
+                    val legacyMysql = spec.id == "mysql" &&
+                        File(layout.data, "mysql").isDirectory &&
+                        File(layout.data, "ibdata1").isFile
+                    if (legacyMysql) {
+                        // A data folder created by an older installer is valid;
+                        // it only lacks our completion marker.
+                        init.marker?.let { marker ->
+                            marker.parentFile?.mkdirs()
+                            marker.writeText(init.markerText)
+                        }
+                    } else if (skip == null || !skip.exists()) {
+                        try {
+                            runBootstrap(init, plan.env, plan.workDir, service.id)
+                        } catch (t: Throwable) {
+                            // --bootstrap refuses a half-written data folder, so
+                            // remove it to let the next start try cleanly.
+                            if (init.marker == null || !init.marker.exists()) {
+                                layout.data.listFiles()?.forEach {
+                                    runCatching { it.deleteRecursively() }
+                                }
+                                restrict(layout.data)
+                            }
+                            throw t
+                        }
                     }
                 }
                 // The password file is only needed while initdb runs.
@@ -310,7 +389,15 @@ object HostingManager {
                     .directory(plan.workDir)
                     .redirectErrorStream(true)
                 builder.environment().putAll(plan.env)
-                val process = builder.start()
+                val process = try {
+                    builder.start()
+                } catch (t: Throwable) {
+                    throw IllegalStateException(
+                        "Could not run ${plan.program.name} from " +
+                            "${plan.program.parent}: ${t.message ?: t.javaClass.simpleName}",
+                        t,
+                    )
+                }
                 synchronized(lock) {
                     running[service.id] = Run(process, signature(service))
                     stopping.remove(service.id)
@@ -389,6 +476,12 @@ object HostingManager {
         }
         log(service.id, "Exited with code $code. Restarting in ${restarts}s.")
         delay(1_000L * restarts)
+        if (synchronized(lock) { service.id in stopping }) {
+            HostingRuntime.update(service.id) {
+                it.copy(status = HostStatus.STOPPED, pid = 0, message = "Stopped")
+            }
+            return
+        }
         start(context, service)
     }
 
@@ -516,7 +609,8 @@ object HostingManager {
             runCatching { process.destroyForcibly() }
             runCatching { process.waitFor(2, TimeUnit.SECONDS) }
         }
-        synchronized(lock) { stopping.remove(id) }
+        // Keep the id in [stopping]: watch() may observe the exit after this
+        // returns and must not start the service again.
     }
 
     suspend fun stopAll() {
@@ -575,7 +669,7 @@ object HostingManager {
     private fun portOpen(port: Int): Boolean = runCatching {
         Socket().use { socket ->
             socket.connect(
-                InetSocketAddress(InetAddress.getLoopbackAddress(), port),
+                InetSocketAddress(loopback, port),
                 PORT_TIMEOUT_MS,
             )
         }

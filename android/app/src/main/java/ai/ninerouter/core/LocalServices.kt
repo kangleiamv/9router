@@ -73,9 +73,13 @@ object LocalServices {
         }
     }
 
+    /**
+     * Android's [InetAddress.getLoopbackAddress] returns `::1`, while hosted
+     * services bind IPv4 `127.0.0.1`, so probe that address explicitly.
+     */
     private fun isOpen(port: Int, timeoutMs: Int): Boolean = runCatching {
         Socket().use { socket ->
-            socket.connect(InetSocketAddress(InetAddress.getLoopbackAddress(), port), timeoutMs)
+            socket.connect(InetSocketAddress(InetAddress.getByName("127.0.0.1"), port), timeoutMs)
         }
         true
     }.getOrDefault(false)

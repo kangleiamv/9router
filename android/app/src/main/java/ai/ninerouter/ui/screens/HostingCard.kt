@@ -34,6 +34,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -42,6 +43,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -50,7 +52,9 @@ import ai.ninerouter.core.HostStatus
 import ai.ninerouter.core.HostedKind
 import ai.ninerouter.core.HostedKinds
 import ai.ninerouter.core.HostedService
+import ai.ninerouter.core.HostStorage
 import ai.ninerouter.core.HostingStore
+import ai.ninerouter.service.server.HostingManager
 import ai.ninerouter.ui.components.AppCard
 import ai.ninerouter.ui.components.AppTextField
 import ai.ninerouter.ui.components.CodeBlock
@@ -66,11 +70,13 @@ import ai.ninerouter.ui.theme.Rose
 import ai.ninerouter.ui.theme.TextMuted
 import ai.ninerouter.ui.theme.TextPrimary
 import ai.ninerouter.ui.theme.TextSecondary
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
- * Runtimes hosted by the app itself. Binaries are discovered on the device
- * (app `bin` folder, PATH or Termux); the card starts, stops and publishes them
- * without bundling any runtime.
+ * Runtimes hosted by the app itself. PHP, Node.js, MariaDB and PostgreSQL are
+ * bundled; Python and Redis come from PATH. The card starts, stops, publishes,
+ * and browses the code folder of every service.
  */
 @Composable
 internal fun HostingCard(
@@ -86,9 +92,29 @@ internal fun HostingCard(
     onAutoStart: (String, Boolean) -> Unit,
     onPublish: (HostedService) -> Unit,
 ) {
+    val context = LocalContext.current
     var addOpen by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf<HostedService?>(null) }
     var openLog by remember { mutableStateOf<String?>(null) }
+    var filesFor by remember { mutableStateOf<HostedService?>(null) }
+    var storageTick by remember { mutableStateOf(0) }
+    var usage by remember { mutableStateOf<Map<String, LongArray>>(emptyMap()) }
+    var freeBytes by remember { mutableStateOf(0L) }
+
+    LaunchedEffect(services, storageTick) {
+        val sizes = withContext(Dispatchers.IO) {
+            services.associate { service ->
+                val layout = HostingManager.layout(context, service.id)
+                service.id to longArrayOf(
+                    HostStorage.usage(layout.content),
+                    HostStorage.usage(layout.data),
+                    HostStorage.usage(layout.logs),
+                )
+            }
+        }
+        usage = sizes
+        freeBytes = withContext(Dispatchers.IO) { HostStorage.freeBytes(context.filesDir) }
+    }
 
     AppCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -130,6 +156,13 @@ internal fun HostingCard(
             style = MaterialTheme.typography.bodySmall,
             color = TextMuted,
         )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Device storage: ${HostStorage.formatBytes(freeBytes)} free · " +
+                "code lives in files/hosting/<service>/public",
+            style = MaterialTheme.typography.labelSmall,
+            color = TextMuted,
+        )
 
         val found = HostedKinds.all.filter { availability[it.id] == true }
         if (availability.isNotEmpty()) {
@@ -169,6 +202,8 @@ internal fun HostingCard(
                 onStop = { onStop(service.id) },
                 onAutoStart = { onAutoStart(service.id, it) },
                 onPublish = { onPublish(service) },
+                onFiles = { filesFor = service },
+                usage = usage[service.id],
                 onDelete = { deleting = service },
             )
         }
@@ -178,6 +213,15 @@ internal fun HostingCard(
             Spacer(Modifier.width(3.dp))
             Text("Add hosted service", color = Brand, style = MaterialTheme.typography.labelMedium)
         }
+    }
+
+    filesFor?.let { service ->
+        HostFilesDialog(
+            title = "${service.name} files",
+            root = HostingManager.layout(context, service.id).content,
+            onDismiss = { filesFor = null },
+            onChanged = { storageTick++ },
+        )
     }
 
     if (addOpen) {
@@ -233,6 +277,8 @@ private fun ServiceRow(
     onStop: () -> Unit,
     onAutoStart: (Boolean) -> Unit,
     onPublish: () -> Unit,
+    onFiles: () -> Unit,
+    usage: LongArray?,
     onDelete: () -> Unit,
 ) {
     val statusColor = when (state.status) {
@@ -328,6 +374,31 @@ private fun ServiceRow(
             }
             TextButton(onClick = onDelete) {
                 Icon(Icons.Filled.Delete, contentDescription = "Delete ${service.name}", tint = Rose, modifier = Modifier.size(17.dp))
+            }
+        }
+
+        Spacer(Modifier.height(6.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    if (usage == null) {
+                        "Storage · measuring…"
+                    } else {
+                        "Storage · code ${HostStorage.formatBytes(usage[0])} · " +
+                            "data ${HostStorage.formatBytes(usage[1])} · " +
+                            "logs ${HostStorage.formatBytes(usage[2])}"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextMuted,
+                )
+                Text(
+                    "Open, edit and upload files served by this service.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextMuted,
+                )
+            }
+            TextButton(onClick = onFiles) {
+                Text("Files", color = Brand, style = MaterialTheme.typography.labelMedium)
             }
         }
 

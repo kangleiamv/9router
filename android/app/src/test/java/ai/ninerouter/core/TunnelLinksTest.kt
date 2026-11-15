@@ -480,4 +480,105 @@ class TunnelLinksTest {
         assertFalse(TunnelLinks.pathMatches("/blog", "/blogger"))
         assertFalse(TunnelLinks.pathMatches("/blog", "/Blog"))
     }
+
+    @Test
+    fun `normalizes loopback tcp targets`() {
+        assertEquals("tcp://127.0.0.1:6379", TunnelLinks.normalizeTcpTarget("6379"))
+        assertEquals("tcp://localhost:5432", TunnelLinks.normalizeTcpTarget("localhost:5432"))
+        assertEquals("tcp://127.0.0.1:3306", TunnelLinks.normalizeTcpTarget("mysql://127.0.0.1:3306"))
+        assertEquals("tcp://[::1]:22", TunnelLinks.normalizeTcpTarget("tcp://[::1]:22"))
+        assertNull(TunnelLinks.normalizeTcpTarget("tcp://192.168.1.10:6379"))
+        assertNull(TunnelLinks.normalizeTcpTarget("tcp://127.0.0.1"))
+        assertNull(TunnelLinks.normalizeTcpTarget("tcp://user:pass@127.0.0.1:6379"))
+        assertNull(TunnelLinks.normalizeTcpTarget("tcp://127.0.0.1:6379/path"))
+        assertNull(TunnelLinks.normalizeTcpTarget("http://127.0.0.1:6379"))
+    }
+
+    @Test
+    fun `infers tcp kind from scheme and stored links`() {
+        assertEquals(TunnelLinks.KIND_TCP, TunnelLinks.normalizeKind("", "tcp://127.0.0.1:6379"))
+        assertEquals(TunnelLinks.KIND_TCP, TunnelLinks.normalizeKind("", "redis://127.0.0.1:6379"))
+        assertEquals(TunnelLinks.KIND_TCP, TunnelLinks.normalizeKind("", "postgres://127.0.0.1:5432"))
+        assertTrue(TunnelLinks.isTcp(link(target = "tcp://127.0.0.1:6379", kind = "")))
+
+        val raw = """[{"id":"r","name":"Redis","host":"redis.example.com","target":"tcp://127.0.0.1:6379","mode":"quick"}]"""
+        val restored = TunnelLinks.decode(raw).single()
+        assertEquals(TunnelLinks.KIND_TCP, restored.kind)
+        assertEquals(TunnelLinks.MODE_NAMED, restored.mode)
+    }
+
+    @Test
+    fun `tcp links must be named with a hostname`() {
+        val quickError = runCatching {
+            TunnelLinks.fromDraft(
+                draft(
+                    target = "tcp://127.0.0.1:6379",
+                    mode = TunnelLinks.MODE_QUICK,
+                    kind = TunnelLinks.KIND_TCP,
+                ),
+            )
+        }.exceptionOrNull()
+        assertTrue(quickError is IllegalArgumentException)
+        assertTrue(quickError!!.message!!.contains("quick tunnels only carry HTTP"))
+
+        val namedError = runCatching { TunnelLinks.fromDraft(draft(target = "6379", kind = TunnelLinks.KIND_TCP)) }
+            .exceptionOrNull()
+        assertTrue(namedError is IllegalArgumentException)
+        assertTrue(namedError!!.message!!.contains("TCP services need"))
+    }
+
+    @Test
+    fun `named tcp links drop path and credentials`() {
+        val saved = TunnelLinks.fromDraft(
+            draft(
+                name = "Redis",
+                host = "redis.example.com",
+                path = "/ignored",
+                target = "tcp://127.0.0.1:6379",
+                stripPrefix = true,
+                mode = TunnelLinks.MODE_NAMED,
+                kind = TunnelLinks.KIND_TCP,
+                username = "user",
+                password = "secret",
+            ),
+        )
+        assertEquals(TunnelLinks.KIND_TCP, saved.kind)
+        assertEquals(TunnelLinks.MODE_NAMED, saved.mode)
+        assertEquals("redis.example.com", saved.host)
+        assertEquals("", saved.path)
+        assertEquals("", saved.key)
+        assertEquals("", saved.username)
+        assertEquals("", saved.password)
+        assertFalse(saved.stripPrefix)
+        assertEquals("tcp://127.0.0.1:6379", saved.target)
+    }
+
+    @Test
+    fun `tcp links never match http requests or produce urls`() {
+        val tcp = link(host = "redis.example.com", target = "tcp://127.0.0.1:6379", kind = TunnelLinks.KIND_TCP)
+        assertNull(TunnelLinks.match(listOf(tcp), "redis.example.com", "/"))
+        assertEquals("", TunnelLinks.publicUrl("https://abc.trycloudflare.com", "token", tcp))
+        assertEquals("", TunnelLinks.browserUrl("https://redis.example.com", tcp))
+        assertEquals("", TunnelLinks.ingressSummary(listOf(tcp), 20128))
+    }
+
+    @Test
+    fun `builds native tcp commands and ingress summary`() {
+        val redis = link(host = "redis.example.com", target = "tcp://127.0.0.1:6379", kind = TunnelLinks.KIND_TCP)
+        assertEquals("tcp://127.0.0.1:6379", TunnelLinks.nativeTarget(redis))
+        assertEquals(
+            "cloudflared access tcp --hostname redis.example.com --url 127.0.0.1:6379",
+            TunnelLinks.nativeAccessCommand("redis.example.com", redis),
+        )
+        assertEquals(
+            "cloudflared access tcp --hostname <tcp-hostname> --url 127.0.0.1:6379",
+            TunnelLinks.nativeAccessCommand("", redis),
+        )
+
+        val http = link(host = "blog.example.com", target = "http://127.0.0.1:3000")
+        assertEquals(
+            "blog.example.com  ->  http://127.0.0.1:20128",
+            TunnelLinks.ingressSummary(listOf(http, redis), 20128),
+        )
+    }
 }

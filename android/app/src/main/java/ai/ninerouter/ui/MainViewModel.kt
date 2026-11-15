@@ -3,7 +3,12 @@ package ai.ninerouter.ui
 import ai.ninerouter.core.AppContainer
 import ai.ninerouter.core.CompatibleProbe
 import ai.ninerouter.core.DashboardStats
+import ai.ninerouter.core.FtpHostRuntime
+import ai.ninerouter.core.FtpHostSettings
+import ai.ninerouter.core.FtpHostState
+import ai.ninerouter.core.FtpHostStore
 import ai.ninerouter.core.LinkTunnelRuntime
+import ai.ninerouter.core.LocalServices
 import ai.ninerouter.core.ProxyRuntime
 import ai.ninerouter.core.ProviderUsage
 import ai.ninerouter.core.TunnelLink
@@ -89,6 +94,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val lastError: StateFlow<String?> = ProxyRuntime.lastError
     val tunnelState: StateFlow<TunnelState> = TunnelRuntime.state
     val linkTunnels: StateFlow<Map<String, TunnelState>> = LinkTunnelRuntime.states
+    val ftpHostState: StateFlow<FtpHostState> = FtpHostRuntime.state
+
+    private val _detectedPorts = MutableStateFlow<Set<Int>?>(null)
+    val detectedPorts: StateFlow<Set<Int>?> = _detectedPorts.asStateFlow()
+
+    private val _scanningPorts = MutableStateFlow(false)
+    val scanningPorts: StateFlow<Boolean> = _scanningPorts.asStateFlow()
 
     private val _busy = MutableStateFlow<Set<String>>(emptySet())
     val busy: StateFlow<Set<String>> = _busy.asStateFlow()
@@ -235,6 +247,58 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             token = "",
             hostname = current["tunnel_hostname"].orEmpty(),
         )
+    }
+
+    /** Persist and apply the optional on-device FTP host. */
+    fun saveFtpHost(settings: FtpHostSettings) {
+        val context = getApplication<Application>()
+        viewModelScope.launch {
+            val safe = runCatching { FtpHostStore.require(settings) }
+                .getOrElse {
+                    emit(it.message ?: "Invalid FTP host settings", true)
+                    return@launch
+                }
+            val gatewayPort = ProxyRuntime.port.value
+            val publicPort = TunnelPorts.publicPort(gatewayPort)
+            if (safe.port == gatewayPort || safe.port == publicPort) {
+                emit("FTP host port ${safe.port} belongs to the 9Router gateway.", true)
+                return@launch
+            }
+            if (FtpHostStore.isPassivePort(safe.port)) {
+                emit("FTP host port ${safe.port} is reserved for passive data connections.", true)
+                return@launch
+            }
+            runCatching {
+                repo.putSetting(FtpHostStore.SETTINGS_KEY, FtpHostStore.encode(safe))
+                refreshSettings()
+            }.onFailure {
+                emit(it.message ?: "Could not save the FTP host", true)
+                return@launch
+            }
+            if (ProxyRuntime.running.value) {
+                ProxyForegroundService.syncFtpHost(context)
+            }
+            emit(if (safe.enabled) "FTP host saved · starting on 127.0.0.1:${safe.port}" else "FTP host stopped")
+        }
+    }
+
+    /** Probe loopback ports so the UI can mark services that are actually up. */
+    fun scanLocalServices() {
+        if (_scanningPorts.value) return
+        val links = TunnelLinks.decode(_settings.value[TunnelLinks.SETTINGS_KEY])
+        val ftpHost = FtpHostStore.decode(_settings.value[FtpHostStore.SETTINGS_KEY])
+        val ports = (
+            LocalServices.defaultPorts +
+                links.mapNotNull { TunnelLinks.targetPort(it.target) } +
+                listOfNotNull(ftpHost.port.takeIf { ftpHost.enabled })
+            ).distinct()
+        viewModelScope.launch {
+            _scanningPorts.value = true
+            _detectedPorts.value = runCatching {
+                LocalServices.scan(ports)
+            }.getOrDefault(emptySet())
+            _scanningPorts.value = false
+        }
     }
 
     /** Persist a validated local link. The public listener reads it per request. */

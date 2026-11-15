@@ -18,7 +18,7 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 | OAuth | Browser sign-in for Antigravity, Gemini CLI and Claude Code with a one-shot loopback callback, PKCE for Claude, automatic token refresh |
 | Routing | Combos, vision combo, per-account fallback, exponential backoff, model locks |
 | Telegram | Bot API long polling inside the foreground service, `/help` `/model` `/combo` `/vision` `/status` `/quota` `/clear` |
-| Cloudflare Tunnel | Optional public endpoint via a bundled native `cloudflared` connector: quick `trycloudflare.com` URLs or named Zero Trust tunnels, plus local links that each choose their own quick connector or the shared named tunnel; HTTP links and FTP servers with a browser file view or a native named TCP route |
+| Cloudflare Tunnel | Optional public endpoint via a bundled native `cloudflared` connector: quick `trycloudflare.com` URLs or named Zero Trust tunnels, plus local links that each choose their own quick connector or the shared named tunnel; HTTP apps, an optional on-device FTP host with a browser file view, and named TCP routes for databases and SSH |
 | UI | Compose Material 3, Obsidian dark theme, drawer navigation |
 | Background | Foreground service + boot receiver (auto-start optional) |
 
@@ -31,7 +31,7 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 - **Usage** — animated 7-day/hourly charts, provider and status breakdowns, and a dedicated Overview / Request log switcher with a day-grouped, filterable request feed
 - **Quota Tracker** — live provider limits (Antigravity, Gemini CLI, Claude, DeepSeek, Groq, GLM, OpenCode, Vercel AI Gateway, Ollama Cloud, MiniMax), animated gauges, reset countdowns, local usage fallback, and cooldown/model-lock tracking
 - **Telegram Bot** — bot token, owner chat id, routing, notifications, commands
-- **Cloudflare Tunnel** — quick or named tunnel, public URL with copy/open/retry, connector state and live log tail, and local links where every link chooses a dedicated Quick tunnel or the shared Named tunnel, including local FTP servers shown in an access-key protected browser
+- **Cloudflare Tunnel** — quick or named tunnel, public URL with copy/open/retry, connector state and live log tail, an optional FTP host serving device storage, and local links where every link chooses a dedicated Quick tunnel or the shared Named tunnel; the editor fills service presets and detects listening loopback ports
 - **Console Log** — live day-grouped request inspector with status filters, collapsible search, expandable request/response payloads and one-tap copy
 - **Settings** — port, auto-start, retention, storage, runtime info
 
@@ -67,10 +67,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.10>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.11>.
 
 ```bash
-adb install -r 9router-android-1.3.10-debug.apk
+adb install -r 9router-android-1.3.11-debug.apk
 ```
 
 Or download the artifact and open it on the device (allow install from unknown
@@ -246,6 +246,23 @@ per service running on the device, then choose how that link is published:
   matched by public hostname, by a path prefix on the main hostname, or both.
   Use this for stable custom domains from your Cloudflare account.
 
+The editor starts with the link type, then offers the matching presets:
+
+- **Web app** — PHP (`8000`), Node.js (`3000`), Python `http.server` (`8000`),
+  Flask/Django (`5000`), Vite (`5173`), nginx (`8080`) and Apache (`8080`).
+- **FTP** — an FTP server on `2121`, or **Use this device** to point at the
+  built-in host described below.
+- **TCP** — Redis (`6379`), PostgreSQL (`5432`), MySQL/MariaDB (`3306`),
+  MongoDB (`27017`), SSH (`22`) and any custom port. TCP services are Native
+  only: quick tunnels carry HTTP, so every TCP link gets a Named route.
+
+Press **Detect** (or the refresh icon in the Local links header) to probe those
+ports on loopback in parallel. Each detected service is listed with its name
+and port, and **Use** fills the editor. Link rows also show whether their target
+is currently listening. Scanning only opens short-lived TCP connections to
+`127.0.0.1`; the app does not bundle PHP, Node.js, nginx, MySQL or any other
+runtime, it only publishes services already running (for example in Termux).
+
 Every link also has:
 
 - **Local URL** — loopback only (`localhost`, `127.0.0.1` or `[::1]`) with the
@@ -275,10 +292,39 @@ Edits apply immediately: saving, deleting or toggling a link reconciles only the
 quick connectors that changed, without restarting the gateway connector or
 changing its URL.
 
+### FTP host on this device
+
+**FTP host on this device** turns the phone into the FTP server, so a tunnel
+link can publish it without any external process. It uses Apache FtpServer
+inside the app, binds the control port to `127.0.0.1` only (default `2121`) and
+uses loopback passive data ports `41000-41009`, so nothing is reachable from the
+LAN. It starts and stops with the proxy foreground service.
+
+- **Folder** — empty means the app-private external folder
+  (`Android/data/ai.ninerouter/files/ftp`), which needs no permission. **App
+  folder** selects it again.
+- **Shared storage** — point the folder at `/storage/emulated/0` (or a
+  subfolder) to serve Downloads, DCIM and documents. Android 11+ requires
+  **All files access**; the card shows a **Grant file access** button that opens
+  the system setting. Android 10 and older use the legacy read/write
+  permissions instead.
+- **Username / password** — blank username serves anonymous FTP; any password is
+  accepted for anonymous, as FTP clients expect. A configured username requires
+  the matching password. The password is stored with the Android Keystore.
+- **Read-only** — clients can list and download but uploads, renames and deletes
+  are refused. Writable folders are verified with a small write probe before the
+  server starts.
+- **Control port** — must be between `1024` and `65535`, cannot be a 9Router
+  gateway port, and cannot fall in the passive range.
+
+The server uses UTF-8, MLSD listings and passive mode. Every FTP link that
+points at `ftp://127.0.0.1:<port>` gets the browser file view described below,
+with access-key protection and the same read/write rules.
+
 ### FTP servers
 
-Choose **FTP server** when adding a local link to publish an FTP server running
-on the device or on a Termux session:
+Choose **FTP server** when adding a link to publish the built-in host or an FTP
+server running on the device in a Termux session:
 
 - **Local FTP URL** — plain FTP on loopback only, for example
   `ftp://127.0.0.1:2121`, with an optional base folder such as
@@ -300,10 +346,34 @@ on the device or on a Termux session:
   `cloudflared access tcp --hostname <ftp-hostname> --url 127.0.0.1:<port>`.
   Native FTP is unavailable on quick tunnels, and one hostname cannot serve
   both HTTP and TCP, so the browser and native FTP always use different
-  hostnames.
+  hostnames. Note that FTP opens a second connection for every transfer:
+  a single Cloudflare TCP route forwards the control channel only, so most
+  clients fail to list or transfer files through it. The access-key protected
+  browser is the reliable way to move files through the tunnel.
 
 Anyone with the browser URL and access key can list, download and change files,
 so share FTP links as carefully as the server's own credentials.
+
+### TCP services
+
+Redis, PostgreSQL, MySQL, MongoDB, SSH and any other non-HTTP service cannot use
+the HTTP browser or a quick tunnel. Add a **TCP** link instead:
+
+- **Local TCP address** — loopback with a port, for example
+  `tcp://127.0.0.1:6379`. A bare port such as `6379` means
+  `127.0.0.1:6379`; paths and credentials are rejected.
+- **TCP hostname** — a hostname you add to the same Zero Trust tunnel. Create a
+  public hostname with service `tcp://127.0.0.1:<port>` in the dashboard, then
+  attach a Service Auth or WARP policy.
+- **Client command** — the link row (and the editor) shows
+  `cloudflared access tcp --hostname <host> --url 127.0.0.1:<port>` plus the
+  usual CLI for the detected service, such as `redis-cli`. Run the first command
+  on your own machine, leave it running, and connect with the second. WARP
+  clients can reach the hostname directly instead.
+
+TCP links are always Named, never match HTTP requests, and are excluded from the
+generated ingress summary because they do not point at the local HTTP router.
+
 
 Only the OpenAI-compatible surface and the enabled local links are published:
 `/v1/models`, `/v1/chat/completions`, their short aliases, quick-link hostnames
@@ -332,3 +402,8 @@ connector is unavailable.
 - OAuth sign-in uses the system browser and a random loopback port; no Google
   or Anthropic password ever reaches the app. Tokens are stored encrypted and
   refreshed automatically before they expire.
+- The FTP host and the service scan only work while the app process is alive;
+  the host starts with the proxy foreground service. The app publishes existing
+  loopback services and does not bundle their runtimes.
+- Cloudflare quick tunnels carry HTTP only. TCP services and native FTP need a
+  Named tunnel, a Zero Trust hostname and a client policy.

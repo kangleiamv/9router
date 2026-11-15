@@ -1,0 +1,128 @@
+package ai.ninerouter.service.server
+
+import ai.ninerouter.core.FtpHostSettings
+import ai.ninerouter.core.FtpHostStore
+import org.apache.ftpserver.DataConnectionConfigurationFactory
+import org.apache.ftpserver.FtpServer
+import org.apache.ftpserver.FtpServerFactory
+import org.apache.ftpserver.ftplet.Authentication
+import org.apache.ftpserver.ftplet.AuthenticationFailedException
+import org.apache.ftpserver.ftplet.Authority
+import org.apache.ftpserver.ftplet.User
+import org.apache.ftpserver.ftplet.UserManager
+import org.apache.ftpserver.listener.ListenerFactory
+import org.apache.ftpserver.usermanager.AnonymousAuthentication
+import org.apache.ftpserver.usermanager.UsernamePasswordAuthentication
+import org.apache.ftpserver.usermanager.impl.BaseUser
+import org.apache.ftpserver.usermanager.impl.ConcurrentLoginPermission
+import org.apache.ftpserver.usermanager.impl.WritePermission
+import java.io.File
+
+/**
+ * Embedded FTP server over a local folder.
+ *
+ * Apache FtpServer handles the protocol (passive mode, UTF-8, MLSD, resume) so
+ * the app only owns configuration and lifecycle. The listener binds to
+ * loopback; the tunnel exposes the server, never the LAN.
+ */
+internal object EmbeddedFtpServer {
+    private var server: FtpServer? = null
+
+    @Synchronized
+    fun start(settings: FtpHostSettings, root: File) {
+        stop()
+        val user = BaseUser().apply {
+            name = settings.username.ifBlank { UserManager.ANONYMOUS }
+            password = settings.password
+            homeDirectory = root.absolutePath
+            enabled = true
+            maxIdleTime = 0
+            // BaseUser refuses a login when no authority accepts the
+            // concurrent-login request, so this one is always present. Zero
+            // means "no extra limit"; the listener's connection config still
+            // caps total sessions.
+            authorities = buildList<Authority> {
+                add(ConcurrentLoginPermission(0, 0))
+                if (!settings.readOnly) add(WritePermission())
+            }
+        }
+        val listener = ListenerFactory().apply {
+            port = settings.port
+            serverAddress = LOOPBACK
+            idleTimeout = IDLE_SECONDS
+            dataConnectionConfiguration = DataConnectionConfigurationFactory().apply {
+                setActiveEnabled(false)
+                setPassiveAddress(LOOPBACK)
+                setPassivePorts(FtpHostStore.PASSIVE_PORTS)
+                setIdleTime(IDLE_SECONDS)
+            }.createDataConnectionConfiguration()
+        }.createListener()
+
+        val factory = FtpServerFactory().apply {
+            addListener("default", listener)
+            userManager = DeviceUserManager(user)
+        }
+        val created = factory.createServer()
+        try {
+            created.start()
+        } catch (t: Throwable) {
+            runCatching { created.stop() }
+            throw t
+        }
+        server = created
+    }
+
+    @Synchronized
+    fun stop() {
+        val current = server ?: return
+        server = null
+        runCatching { current.stop() }
+    }
+
+    @Synchronized
+    fun isRunning(): Boolean = server?.isStopped == false
+
+    private const val LOOPBACK = "127.0.0.1"
+    private const val IDLE_SECONDS = 300
+
+    /**
+     * One configured account. Kept in memory so the plaintext password never
+     * touches disk; settings encrypt it separately for the next start.
+     */
+    private class DeviceUserManager(private val user: BaseUser) : UserManager {
+        override fun getUserByName(name: String?): User? =
+            user.takeIf { it.name.equals(name, ignoreCase = true) }
+
+        override fun getAllUserNames(): Array<String> = arrayOf(user.name)
+
+        override fun delete(name: String?) = Unit
+
+        override fun save(user: User?) = Unit
+
+        override fun doesExist(name: String?): Boolean = user.name.equals(name, ignoreCase = true)
+
+        override fun authenticate(authentication: Authentication): User {
+            val name = when (authentication) {
+                is UsernamePasswordAuthentication -> authentication.username
+                is AnonymousAuthentication -> UserManager.ANONYMOUS
+                else -> throw AuthenticationFailedException("Unsupported authentication")
+            }
+            val password = when (authentication) {
+                is UsernamePasswordAuthentication -> authentication.password
+                else -> ""
+            }
+            // A blank configured password accepts any password, which is how
+            // anonymous FTP clients (and blank-password accounts) behave.
+            if (!user.name.equals(name, ignoreCase = true) ||
+                (user.password.isNotEmpty() && user.password != password)
+            ) {
+                throw AuthenticationFailedException("Invalid FTP credentials")
+            }
+            return user
+        }
+
+        override fun getAdminName(): String = user.name
+
+        override fun isAdmin(name: String?): Boolean = false
+    }
+}

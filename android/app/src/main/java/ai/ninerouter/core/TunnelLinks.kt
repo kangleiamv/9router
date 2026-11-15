@@ -75,8 +75,10 @@ object TunnelLinks {
     const val MODE_NAMED = "named"
     const val KIND_HTTP = "http"
     const val KIND_FTP = "ftp"
+    const val KIND_TCP = "tcp"
 
     private val LOOPBACK_HOSTS = setOf("localhost", "127.0.0.1", "::1")
+    private val TCP_SCHEMES = setOf("tcp", "redis", "postgres", "postgresql", "mysql", "mongodb", "ssh")
 
     private val RESERVED = listOf(
         "/v1",
@@ -96,9 +98,10 @@ object TunnelLinks {
             Json.lenient.decodeFromString<List<TunnelLink>>(raw)
                 .filter { it.id.isNotBlank() && it.target.isNotBlank() }
                 .map {
+                    val kind = normalizeKind(it.kind, it.target)
                     it.copy(
-                        mode = normalizeMode(it.mode, it.host),
-                        kind = normalizeKind(it.kind, it.target),
+                        mode = if (kind == KIND_TCP) MODE_NAMED else normalizeMode(it.mode, it.host),
+                        kind = kind,
                         password = Crypto.decrypt(it.password).orEmpty(),
                     )
                 }
@@ -128,24 +131,40 @@ object TunnelLinks {
         blockedPorts: Set<Int> = emptySet(),
     ): TunnelLink {
         val kind = normalizeKind(draft.kind, draft.target)
-        val mode = normalizeMode(draft.mode, draft.host)
+        val mode = if (kind == KIND_TCP) MODE_NAMED else normalizeMode(draft.mode, draft.host)
+        if (kind == KIND_TCP && normalizeMode(draft.mode, draft.host) == MODE_QUICK) {
+            throw IllegalArgumentException(
+                "TCP services need a Named link: Cloudflare quick tunnels only carry HTTP. " +
+                    "Add a TCP hostname in Zero Trust and choose Named.",
+            )
+        }
         // Quick links own a generated hostname, so stored host/path values are
         // ignored (and not validated) in that mode.
         val host = if (mode == MODE_NAMED) normalizeHost(draft.host) else ""
-        val path = if (mode == MODE_NAMED) normalizePath(draft.path) else ""
+        val path = if (mode == MODE_NAMED && kind != KIND_TCP) normalizePath(draft.path) else ""
+        if (kind == KIND_TCP && host.isEmpty()) {
+            throw IllegalArgumentException(
+                "TCP services need the public hostname you will route to this tunnel in Zero Trust.",
+            )
+        }
         if (mode == MODE_NAMED && host.isEmpty() && path.isEmpty()) {
             throw IllegalArgumentException(
                 "Named links need a public path or a public hostname. " +
                     "Choose Quick tunnel to get a generated trycloudflare.com URL instead.",
             )
         }
-        val target = if (kind == KIND_FTP) {
-            normalizeFtpTarget(draft.target)
+        val target = when (kind) {
+            KIND_FTP -> normalizeFtpTarget(draft.target)
                 ?: throw IllegalArgumentException(
                     "Local FTP URL must be loopback, for example ftp://127.0.0.1:2121.",
                 )
-        } else {
-            normalizeTarget(draft.target)
+
+            KIND_TCP -> normalizeTcpTarget(draft.target)
+                ?: throw IllegalArgumentException(
+                    "Local TCP address must be loopback with a port, for example tcp://127.0.0.1:6379.",
+                )
+
+            else -> normalizeTarget(draft.target)
                 ?: throw IllegalArgumentException(
                     "Local URL must be loopback http(s), for example http://127.0.0.1:8080.",
                 )
@@ -169,13 +188,14 @@ object TunnelLinks {
                     host.isNotBlank() -> host
                     path.isNotBlank() -> path
                     kind == KIND_FTP -> "FTP server"
+                    kind == KIND_TCP -> "TCP service"
                     else -> "Local link"
                 }
             },
             host = host,
             path = path,
             target = target,
-            stripPrefix = if (kind == KIND_FTP) true else draft.stripPrefix,
+            stripPrefix = kind == KIND_HTTP && draft.stripPrefix,
             enabled = draft.enabled,
             mode = mode,
             kind = kind,
@@ -204,13 +224,20 @@ object TunnelLinks {
     /** Resolve an explicit or legacy link kind from its target scheme. */
     fun normalizeKind(raw: String, target: String = ""): String = when (raw.trim().lowercase()) {
         KIND_FTP -> KIND_FTP
+        KIND_TCP -> KIND_TCP
         KIND_HTTP -> KIND_HTTP
-        else -> if (target.trim().startsWith("ftp://", true)) KIND_FTP else KIND_HTTP
+        else -> when (target.trim().substringBefore("://", "").lowercase()) {
+            "ftp" -> KIND_FTP
+            "tcp", "redis", "postgres", "postgresql", "mysql", "mongodb", "ssh" -> KIND_TCP
+            else -> KIND_HTTP
+        }
     }
 
     fun kindOf(link: TunnelLink): String = normalizeKind(link.kind, link.target)
 
     fun isFtp(link: TunnelLink): Boolean = kindOf(link) == KIND_FTP
+
+    fun isTcp(link: TunnelLink): Boolean = kindOf(link) == KIND_TCP
 
     /** Normalize a public hostname. Blank means "match by path only". */
     fun normalizeHost(raw: String): String {
@@ -323,6 +350,34 @@ object TunnelLinks {
         return "ftp://$authority$portPart$basePath"
     }
 
+    /**
+     * Normalize a loopback TCP origin for services that speak no HTTP, such as
+     * Redis, PostgreSQL, MySQL or SSH. The public side is a Zero Trust TCP
+     * hostname; 9Router only stores the target and the ingress details.
+     */
+    fun normalizeTcpTarget(raw: String): String? {
+        val value = raw.trim()
+        if (value.isEmpty()) return null
+        val withScheme = when {
+            value.all { it.isDigit() } -> "tcp://127.0.0.1:$value"
+            value.contains("://") -> value
+            else -> "tcp://$value"
+        }
+        val uri = runCatching { URI(withScheme) }.getOrNull() ?: return null
+        val scheme = uri.scheme?.lowercase() ?: return null
+        if (scheme !in TCP_SCHEMES) return null
+        if (uri.userInfo != null || uri.query != null || uri.fragment != null) return null
+        val uriPath = uri.rawPath.orEmpty()
+        if (uriPath.isNotEmpty() && uriPath != "/") return null
+        var host = uri.host?.lowercase() ?: return null
+        if (host.startsWith("[") && host.endsWith("]")) host = host.substring(1, host.length - 1)
+        if (host !in LOOPBACK_HOSTS) return null
+        val port = uri.port
+        if (port !in 1..65535) return null
+        val authority = if (host.contains(':')) "[$host]" else host
+        return "tcp://$authority:$port"
+    }
+
     /** Normalize an FTP base directory, rejecting traversal and control bytes. */
     fun normalizeFtpBasePath(raw: String): String? {
         val value = raw.trim()
@@ -365,24 +420,30 @@ object TunnelLinks {
      * generated page and its download/upload forms cannot be used without it.
      */
     fun browserUrl(base: String, link: TunnelLink): String {
-        if (base.isBlank()) return ""
+        if (base.isBlank() || isTcp(link)) return ""
         val url = base.trim().trimEnd('/') + "/"
         if (!isFtp(link) || link.key.isBlank()) return url
         return "$url?k=${link.key}"
     }
 
-    /** Zero Trust TCP ingress target for native FTP clients. */
-    fun nativeFtpTarget(link: TunnelLink): String {
+    /** Zero Trust TCP ingress target for native clients. */
+    fun nativeTarget(link: TunnelLink): String {
         val port = targetPort(link.target) ?: 21
         return "tcp://127.0.0.1:$port"
     }
 
+    /** Zero Trust TCP ingress target for native FTP clients. */
+    fun nativeFtpTarget(link: TunnelLink): String = nativeTarget(link)
+
     /** Client-side command that exposes the named TCP route on a local port. */
-    fun nativeFtpCommand(hostname: String, link: TunnelLink): String {
+    fun nativeAccessCommand(hostname: String, link: TunnelLink): String {
         val port = targetPort(link.target) ?: 21
-        val host = hostname.trim().ifBlank { "<ftp-tcp-hostname>" }
+        val host = hostname.trim().ifBlank { "<tcp-hostname>" }
         return "cloudflared access tcp --hostname $host --url 127.0.0.1:$port"
     }
+
+    fun nativeFtpCommand(hostname: String, link: TunnelLink): String =
+        nativeAccessCommand(hostname, link)
 
     fun targetPort(target: String): Int? {
         val uri = runCatching { URI(target) }.getOrNull() ?: return null
@@ -442,7 +503,7 @@ object TunnelLinks {
             }
         }
 
-        val named = enabled.filter { !isQuick(it) }
+        val named = enabled.filter { !isQuick(it) && !isTcp(it) }
         val byHost = named
             .filter { it.host.isNotBlank() && it.host == host }
             .filter { it.path.isBlank() || pathMatches(it.path, path) }
@@ -496,7 +557,7 @@ object TunnelLinks {
      * [LinkTunnelRuntime] instead.
      */
     fun publicUrl(root: String, mode: String, link: TunnelLink): String {
-        if (isQuick(link)) return ""
+        if (isQuick(link) || isTcp(link)) return ""
         val suffix = if (link.path.isNotBlank()) "${link.path}/" else ""
         if (mode == "token" && link.host.isNotBlank()) {
             return "https://${link.host}$suffix"
@@ -542,7 +603,7 @@ object TunnelLinks {
     /** Lines describing the Zero Trust hostname -> local service mapping. */
     fun ingressSummary(links: List<TunnelLink>, publicPort: Int): String {
         val router = "http://127.0.0.1:$publicPort"
-        return links.filter { it.enabled && !isQuick(it) && it.host.isNotBlank() }
+        return links.filter { it.enabled && !isQuick(it) && !isTcp(it) && it.host.isNotBlank() }
             .joinToString("\n") { link ->
                 "${link.host}  ->  $router${if (link.path.isNotBlank()) link.path else ""}"
             }

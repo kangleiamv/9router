@@ -5,6 +5,7 @@ import ai.ninerouter.R
 import ai.ninerouter.core.AppContainer
 import ai.ninerouter.core.AppRepository
 import ai.ninerouter.core.CloudflareTunnel
+import ai.ninerouter.core.FtpHostStore
 import ai.ninerouter.core.LinkTunnelManager
 import ai.ninerouter.core.LinkTunnelRuntime
 import ai.ninerouter.core.ProxyRuntime
@@ -13,6 +14,7 @@ import ai.ninerouter.core.TunnelOptions
 import ai.ninerouter.core.TunnelPorts
 import ai.ninerouter.core.TunnelRuntime
 import ai.ninerouter.core.TunnelStatus
+import ai.ninerouter.service.server.FtpHostManager
 import ai.ninerouter.service.server.KtorProxyServer
 import ai.ninerouter.util.Crypto
 import android.app.Notification
@@ -43,6 +45,7 @@ class ProxyForegroundService : Service() {
         const val ACTION_START_TUNNEL = "ai.ninerouter.action.START_TUNNEL"
         const val ACTION_STOP_TUNNEL = "ai.ninerouter.action.STOP_TUNNEL"
         const val ACTION_SYNC_LINKS = "ai.ninerouter.action.SYNC_LINKS"
+        const val ACTION_SYNC_FTP_HOST = "ai.ninerouter.action.SYNC_FTP_HOST"
         const val EXTRA_LINK_ID = "ai.ninerouter.extra.LINK_ID"
         const val CHANNEL_ID = "ninerouter_proxy"
         const val NOTIFICATION_ID = 9001
@@ -71,6 +74,14 @@ class ProxyForegroundService : Service() {
         fun stopTunnel(context: Context) {
             val intent = Intent(context, ProxyForegroundService::class.java).apply {
                 action = ACTION_STOP_TUNNEL
+            }
+            runCatching { context.startService(intent) }
+        }
+
+        /** Apply FTP host settings while the gateway is running. */
+        fun syncFtpHost(context: Context) {
+            val intent = Intent(context, ProxyForegroundService::class.java).apply {
+                action = ACTION_SYNC_FTP_HOST
             }
             runCatching { context.startService(intent) }
         }
@@ -124,6 +135,7 @@ class ProxyForegroundService : Service() {
                             return@launch
                         }
                     }
+                    applyFtpHost(runCatching { repo.settingsMap() }.getOrDefault(emptyMap()))
                     startTunnelInternal(port)
                 }
                 START_STICKY
@@ -133,6 +145,14 @@ class ProxyForegroundService : Service() {
                 startForegroundIfNeeded()
                 scope.launch {
                     syncLinksInternal(intent.getStringExtra(EXTRA_LINK_ID))
+                }
+                START_STICKY
+            }
+
+            ACTION_SYNC_FTP_HOST -> {
+                startForegroundIfNeeded()
+                scope.launch {
+                    applyFtpHost(runCatching { repo.settingsMap() }.getOrDefault(emptyMap()))
                 }
                 START_STICKY
             }
@@ -150,6 +170,7 @@ class ProxyForegroundService : Service() {
                     notify(text)
                     if (started) {
                         val settings = repo.settingsMap()
+                        applyFtpHost(settings)
                         if (settings["tunnel_enabled"] == "true") {
                             startTunnelInternal(port)
                         }
@@ -162,6 +183,7 @@ class ProxyForegroundService : Service() {
 
     override fun onDestroy() {
         stopTunnelInternal()
+        FtpHostManager.stop()
         telegram?.stop()
         telegram = null
         KtorProxyServer.stop()
@@ -253,6 +275,14 @@ class ProxyForegroundService : Service() {
             LinkTunnelManager.restart(this, restart, publicPort)
         } else {
             LinkTunnelManager.sync(this, links, publicPort)
+        }
+    }
+
+    /** Start or stop the optional embedded FTP host. */
+    private suspend fun applyFtpHost(settings: Map<String, String>) {
+        val host = FtpHostStore.decode(settings[FtpHostStore.SETTINGS_KEY])
+        withContext(Dispatchers.IO) {
+            FtpHostManager.apply(this@ProxyForegroundService, host)
         }
     }
 

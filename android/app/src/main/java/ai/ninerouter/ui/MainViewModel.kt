@@ -512,14 +512,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** Save environment variables and the build command, restarting if needed. */
-    fun saveHostedEnvironment(id: String, env: Map<String, String>, build: String) {
+    fun saveHostedEnvironment(
+        id: String,
+        env: Map<String, String>,
+        build: String,
+        npmInstall: Boolean = true,
+        npmBuild: Boolean = true,
+    ) {
         val context = getApplication<Application>()
         viewModelScope.launch {
             runCatching {
                 val current = HostingStore.decode(repo.getSetting(HostingStore.SETTINGS_KEY))
                 val service = current.firstOrNull { it.id == id }
                     ?: error("That hosted service no longer exists")
-                val updated = service.copy(env = env, build = build)
+                val updated = service.copy(
+                    env = env,
+                    build = build,
+                    npmInstall = npmInstall,
+                    npmBuild = npmBuild,
+                )
                 val next = current.map { if (it.id == id) updated else it }
                 repo.putSetting(
                     HostingStore.SETTINGS_KEY,

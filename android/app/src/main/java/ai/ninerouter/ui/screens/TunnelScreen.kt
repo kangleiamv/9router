@@ -461,8 +461,8 @@ fun TunnelScreen(viewModel: MainViewModel) {
                     onDeleteRelease = { id, release ->
                         viewModel.deleteHostedRelease(id, release)
                     },
-                    onSaveEnvironment = { id, env, build ->
-                        viewModel.saveHostedEnvironment(id, env, build)
+                    onSaveEnvironment = { id, env, build, npmInstall, npmBuild ->
+                        viewModel.saveHostedEnvironment(id, env, build, npmInstall, npmBuild)
                     },
                 )
             }

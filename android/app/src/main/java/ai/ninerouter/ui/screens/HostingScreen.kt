@@ -79,6 +79,7 @@ import ai.ninerouter.core.HostedKinds
 import ai.ninerouter.core.HostedService
 import ai.ninerouter.service.server.HostingManager
 import ai.ninerouter.core.HostingStore
+import ai.ninerouter.core.NpmRuntime
 import ai.ninerouter.core.TunnelLink
 import ai.ninerouter.core.TunnelLinks
 import ai.ninerouter.core.TunnelPorts
@@ -322,7 +323,15 @@ fun HostingScreen(viewModel: MainViewModel) {
         val target = envFor!!
         HostEnvDialog(
             service = target,
-            onSave = { env, build -> viewModel.saveHostedEnvironment(target.id, env, build) },
+            onSave = { env, build, npmInstall, npmBuild ->
+                viewModel.saveHostedEnvironment(
+                    target.id,
+                    env,
+                    build,
+                    npmInstall,
+                    npmBuild,
+                )
+            },
             onDismiss = { envFor = null },
         )
     }
@@ -853,6 +862,13 @@ private fun SiteManageDialog(
             ai.ninerouter.core.SiteTls.certFile(HostingManager.layout(context, service)),
         )
     }
+    val npmManifest = remember(service.id, service.active, service.entry) {
+        if (service.kind == "node") {
+            NpmRuntime.manifest(HostingManager.layout(context, service).content)
+        } else {
+            null
+        }
+    }
     val dsn = if (database != null && service.dbName.isNotBlank()) {
         ai.ninerouter.core.SiteDatabases.url(
             "127.0.0.1",
@@ -918,6 +934,16 @@ private fun SiteManageDialog(
                 HostValueRow(label = "Entrypoint", value = service.entry.ifBlank {
                     if (service.kind == "static") "index.html" else "default"
                 })
+                if (service.kind == "node") {
+                    HostValueRow(
+                        label = "npm",
+                        value = NpmRuntime.VERSION + " · " + when {
+                            npmManifest?.usesNpmStart == true && service.entry.isBlank() -> "npm start"
+                            npmManifest?.usesNpmBuild == true && service.npmBuild -> "node + build"
+                            else -> "node"
+                        },
+                    )
+                }
                 HostValueRow(
                     label = "Active release",
                     value = service.releases.firstOrNull { it.id == service.active }?.id ?: "folder deploy",

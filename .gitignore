@@ -26,6 +26,8 @@ product
 # misc
 .DS_Store
 *.pem
+# npm's public trust roots are bundled with the app.
+!android/app/src/main/assets/npm/cacert.pem
 
 # debug
 npm-debug.log*

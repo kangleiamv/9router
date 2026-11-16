@@ -170,7 +170,8 @@ class HostingTest {
     @Test
     fun `node port markers are parsed and other lines are ignored`() {
         assertEquals(3456, HostingPlanner.portFromLog("__9ROUTER_PORT__=3456"))
-        assertNull(HostingPlanner.portFromLog("listening on 3456"))
+        assertEquals(3456, HostingPlanner.portFromLog("listening on 3456"))
+        assertNull(HostingPlanner.portFromLog("listening on 80"))
         assertNull(HostingPlanner.portFromLog("__9ROUTER_PORT__=0"))
         assertNull(HostingPlanner.portFromLog("__9ROUTER_PORT__=abc"))
     }
@@ -488,5 +489,77 @@ class HostingTest {
         assertTrue(config.contains("CN = shop.example.com"))
         assertTrue(config.contains("subjectAltName = DNS:shop.example.com"))
         assertTrue(SiteTls.GENERATE_SCRIPT.contains("openssl_x509_export"))
+    }
+
+    @Test
+    fun `node projects with a start script run npm start`() {
+        val layout = layout()
+        layout.content.mkdirs()
+        File(layout.content, "package.json").writeText(
+            """{"name":"demo","scripts":{"start":"node server.js"}}""",
+        )
+        val npm = File(layout.root, "npm/bin/npm-cli.js")
+        val plan = HostingPlanner.plan(
+            service("node", 3000),
+            layout,
+            binaries("node"),
+            npmCli = npm,
+        )
+        assertEquals(listOf(npm.absolutePath, "start", "--silent"), plan.args)
+        assertTrue(plan.env["NODE_OPTIONS"]!!.contains("9router-port.js"))
+        assertTrue(plan.env["NODE_OPTIONS"]!!.contains("--require"))
+        assertEquals(npm.absolutePath, plan.env["NPM_CLI"])
+    }
+
+    @Test
+    fun `deployed npm start is not mistaken for a static site`() {
+        val layout = layout()
+        layout.content.mkdirs()
+        File(layout.content, "package.json").writeText(
+            """{"name":"next-demo","scripts":{"start":"next start"}}""",
+        )
+        val release = HostRelease("1000", 1L, 42L)
+        val npm = File(layout.root, "npm/bin/npm-cli.js")
+        val plan = HostingPlanner.plan(
+            service("node", 3000).copy(releases = listOf(release), active = "1000"),
+            layout,
+            binaries("node"),
+            npmCli = npm,
+        )
+        assertEquals(listOf(npm.absolutePath, "start", "--silent"), plan.args)
+        assertFalse(plan.files.keys.any { it.name == "9router-static-server.js" })
+        assertFalse(plan.scaffold.containsKey(File(layout.content, "server.js")))
+    }
+
+    @Test
+    fun `an explicit entrypoint bypasses npm start`() {
+        val layout = layout()
+        layout.content.mkdirs()
+        File(layout.content, "package.json").writeText(
+            """{"name":"demo","scripts":{"start":"node other.js"}}""",
+        )
+        File(layout.content, "server.js").writeText("console.log('ok')")
+        val plan = HostingPlanner.plan(
+            service("node", 3000).copy(entry = "server.js"),
+            layout,
+            binaries("node"),
+            npmCli = File(layout.root, "npm/bin/npm-cli.js"),
+        )
+        assertEquals(listOf("server.js"), plan.args)
+    }
+
+    @Test
+    fun `npm and framework logs report their listening port`() {
+        assertEquals(3000, HostingPlanner.portFromLog("__9ROUTER_PORT__=3000"))
+        assertEquals(5173, HostingPlanner.portFromLog("  ➜  Local:   http://localhost:5173/"))
+        assertEquals(3000, HostingPlanner.portFromLog("Server listening at http://127.0.0.1:3000"))
+        assertEquals(8080, HostingPlanner.portFromLog("Server running at http://0.0.0.0:8080/"))
+        assertEquals(3000, HostingPlanner.portFromLog("Example app listening on port 3000"))
+        assertEquals(4321, HostingPlanner.portFromLog("  localhost:4321"))
+        assertEquals(3000, HostingPlanner.portFromLog("ready - started server on 0.0.0.0:3000"))
+        assertNull(HostingPlanner.portFromLog("ready in 300ms"))
+        assertNull(HostingPlanner.portFromLog("added 2 packages in 3s"))
+        assertNull(HostingPlanner.portFromLog("GET https://registry.npmjs.org/express 200"))
+        assertNull(HostingPlanner.portFromLog("Compiled at 2024-01-01"))
     }
 }

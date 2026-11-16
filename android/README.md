@@ -19,7 +19,7 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 | Routing | Combos, vision combo, per-account fallback, exponential backoff, model locks |
 | Telegram | Bot API long polling inside the foreground service, `/help` `/model` `/combo` `/vision` `/status` `/quota` `/clear` |
 | Cloudflare Tunnel | Optional public endpoint via a bundled native `cloudflared` connector: quick `trycloudflare.com` URLs or named Zero Trust tunnels, plus local links that each choose their own quick connector or the shared named tunnel; HTTP apps, an optional on-device FTP host with a browser file view, and named TCP routes for databases and SSH |
-| Hosting | Tabbed on-device hosting console: supervised static, PHP, Node.js, Python, Redis, PostgreSQL and MariaDB runtimes on loopback, immutable ZIP/folder releases with rollback, hostnames routed through named local links, MariaDB schema administration through bundled PDO, self-signed TLS pairs from bundled OpenSSL, multi-account FTP logins, a file manager and per-site storage. Every service gets an app-owned folder, generated credentials, log capture and restarts |
+| Hosting | Tabbed on-device hosting console: supervised static, PHP, Node.js, Python, Redis, PostgreSQL and MariaDB runtimes on loopback, immutable ZIP/folder releases with rollback, bundled npm 11.19.1 installs and builds for Node.js, hostnames routed through named local links, MariaDB schema administration through bundled PDO, self-signed TLS pairs from bundled OpenSSL, multi-account FTP logins, a file manager and per-site storage. Every service gets an app-owned folder, generated credentials, log capture and restarts |
 | UI | Compose Material 3, complete dark and light palettes, animated drawer navigation, System/Light/Dark appearance picker |
 | Background | Foreground service + boot receiver (auto-start optional) |
 
@@ -32,7 +32,7 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 - **Usage** — animated 7-day/hourly charts, provider and status breakdowns, and a dedicated Overview / Request log switcher with a day-grouped, filterable request feed
 - **Quota Tracker** — live provider limits (Antigravity, Gemini CLI, Claude, DeepSeek, Groq, GLM, OpenCode, Vercel AI Gateway, Ollama Cloud, MiniMax), animated gauges, reset countdowns, local usage fallback, and cooldown/model-lock tracking
 - **Telegram Bot** — bot token, owner chat id, routing, notifications, commands
-- **Hosting** — full hosting console with Overview, Websites, Databases, FTP, SSL and Storage tabs: start static/PHP/Node.js/Python/Redis/PostgreSQL/MariaDB on loopback, create a site with a free port and starter page, deploy ZIPs or device folders as immutable releases, activate/rollback, assign hostnames (auto-creating a named local link), attach a MariaDB schema with injected `DB_*`/`DATABASE_URL`, issue or remove a self-signed certificate, manage per-site FTP accounts, browse files and inspect storage
+- **Hosting** — full hosting console with Overview, Websites, Databases, FTP, SSL and Storage tabs: start static/PHP/Node.js/Python/Redis/PostgreSQL/MariaDB on loopback, create a site with a free port and starter page, deploy ZIPs or device folders as immutable releases, install Node.js dependencies and run build/start scripts with bundled npm 11.19.1, detect the port npm children really listen on, activate/rollback, assign hostnames (auto-creating a named local link), attach a MariaDB schema with injected `DB_*`/`DATABASE_URL`, issue or remove a self-signed certificate, manage per-site FTP accounts, browse files and inspect storage
 - **Cloudflare Tunnel** — quick or named tunnel, public URL with copy/open/retry, connector state and live log tail, an optional FTP host serving device storage, and local links where every link chooses a dedicated Quick tunnel or the shared Named tunnel; the editor fills service presets and detects listening loopback ports
 - **Console Log** — live day-grouped request inspector with status filters, collapsible search, expandable request/response payloads and one-tap copy
 - **Settings** — port, auto-start, retention, storage, runtime info
@@ -69,10 +69,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.20>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.21>.
 
 ```bash
-adb install -r 9router-android-1.3.20-debug.apk
+adb install -r 9router-android-1.3.21-debug.apk
 ```
 
 The APK is about 98 MB because it carries the arm64 hosting runtimes. It builds
@@ -411,11 +411,24 @@ folder used before the first deploy, `data` for database files, and `home`,
   root URL. Set an entrypoint to run your own file. A deployed release with no
   Node entry file is served statically by the built-in server, so a plain
   `index.html` folder works without writing any server code.
+  When a release carries `package.json`, the bundled npm installs dependencies
+  before activation (`npm ci` when a lockfile exists, otherwise `npm install`)
+  and can run the `build` script. If `scripts.start` exists and no entrypoint is
+  set, the runtime runs `npm start --silent`; setting an entrypoint runs
+  `node <entry>` instead. Both install and build are switches in **Environment**.
+  npm and Node use a bundled Mozilla CA bundle through `NODE_EXTRA_CA_CERTS` and
+  `SSL_CERT_FILE`, because Android has none of Node's compiled-in OpenSSL trust
+  paths. npm's download cache is shared in `files/npm/cache`.
   The app preloads a small agent (`node --require`) that hooks
   `net.Server.listen`, so the port your app actually binds is detected even when
-  it ignores `PORT` or calls `listen(0)`. Detection covers plain `http`, Express
-  and anything else built on `net`, and the row, readiness probe and Publish
-  button all use the detected port while the saved port stays the `PORT` value.
+  it ignores `PORT` or calls `listen(0)`. `NODE_OPTIONS` reaches npm and every
+  child Node process it starts. The agent also rewrites `node` commands spawned
+  by npm to the bundled `libnode.so`, so `npm start` and lifecycle scripts work
+  without a `node` binary on `PATH`. Detection covers plain `http`, Express and
+  anything else built on `net`, and also parses framework output such as Vite's
+  `Local: http://localhost:5173`, Next.js `started server on ...:3000` and
+  `listening on port 8080`. The row, readiness probe and Publish button all use
+  the detected port while the saved port stays the `PORT` value.
 - **Python** — `python3 -m http.server <port> --bind 127.0.0.1 --directory
   <public>`, or your own entrypoint such as `app.py`.
 - **Redis** — AOF persistence in `data`, loopback bind and a generated
@@ -516,10 +529,18 @@ back to any of the last five.
    `.stage-*` folders are removed if a deploy fails.
    The folder is copied, not linked, so editing the original later does not
    change the site until it is hosted again.
-3. If the service has a **build command**, it runs inside the new release via
-   `/system/bin/sh -c` before activation. npm is not bundled, so vendor
-   `node_modules` in the archive or use a build step that only needs the
-   bundled runtimes.
+3. For a Node.js release with `package.json`, **Install dependencies** (on by
+   default) runs the bundled npm inside the new release: `npm ci` when the
+   archive has `package-lock.json`/`npm-shrinkwrap.json`, otherwise
+   `npm install`. If no custom build command is set and `package.json` has a
+   `build` script, **Run npm build** (also on by default) runs
+   `npm run build`. A custom **build command** still wins and runs via
+   `/system/bin/sh -c`; command-position `node`, `npm` and `npx` tokens are
+   rewritten to the bundled binary and CLI so Android's script-execution
+   restriction is avoided.
+   Android 10+ still blocks executing scripts from app-writable storage, so
+   lifecycle scripts that call `node` work, while a build that invokes a
+   `node_modules/.bin` shim such as `next` or `vite` directly may not.
 4. The document root is detected (`public/` for PHP, `index.js`/`server.js`/
    `package.json` `main` for Node.js, `app.py` for Python), the release is
    activated, and the service restarts if it was running (or immediately when
@@ -535,9 +556,11 @@ from a build that guessed `server.js`), the app re-detects the entrypoint at
 startup instead of crash-looping.
 
 **Environment** opens a one-`NAME=value`-per-line editor plus the build
-command. Values are applied on top of the runtime defaults and survive
-restarts; `PORT`, `HOST`, `DOCROOT`, `PATH`, `LD_LIBRARY_PATH`, `HOME`,
-`TMPDIR`, `NODE_ENV`, `PGDATA`, `LANG`, `TZ`, `PWD` and `ANDROID_*` stay owned
+command, and for Node.js shows the bundled npm version with **Install
+dependencies** and **Run npm build** switches. Values are applied on top of the
+runtime defaults and survive restarts; `PORT`, `HOST`, `DOCROOT`, `PATH`,
+`LD_LIBRARY_PATH`, `HOME`, `TMPDIR`, `NODE_ENV`, `PGDATA`, `LANG`, `TZ`, `PWD`,
+`NPM_CLI`, `NODE_BIN` and `ANDROID_*` stay owned
 by the runtime. At most 32 variables are allowed.
 
 The **Files** button and the **storage** row follow the active release, so
@@ -564,8 +587,14 @@ APK, so the hosting card works on a stock device without Termux:
 | Node.js | 26.13.1 | `libnode.so` |
 | MariaDB | 13.0.2 | `libmariadbd.so` |
 | PostgreSQL | 18.6 | `libpg.so`, `libinitdb.so` |
+| npm CLI | 11.19.1 | `assets/npm/npm-11.19.1.zip` |
 
-They are Android/bionic `aarch64` builds from the Termux packages,
+npm is a JavaScript package, not a native library: it runs on the bundled
+`libnode.so`, and its ZIP asset is unpacked once to `files/npm/11.19.1` with a
+Mozilla CA bundle beside it. The app invokes `node bin/npm-cli.js`, so the CLI
+itself is not blocked by Android's ban on executing files from app storage.
+
+The native runtimes are Android/bionic `aarch64` builds from the Termux packages,
 repackaged as `jniLibs` and extracted by the installer to the app's
 `nativeLibraryDir`, the only location Android 10+ lets an app execute. Library
 files that carry a version suffix upstream (`libssl.so.3`, `libz.so.1`,
@@ -585,6 +614,7 @@ Licenses of the bundled runtimes:
 
 - PHP — PHP License 3.01 (<https://www.php.net/license/3_01.txt>)
 - Node.js — MIT (<https://github.com/nodejs/node/blob/main/LICENSE>)
+- npm — Artistic License 2.0 (<https://github.com/npm/cli/blob/latest/LICENSE>)
 - MariaDB — GNU GPL v2 (<https://mariadb.com/kb/en/mariadb-license/>)
 - PostgreSQL — PostgreSQL License
   (<https://www.postgresql.org/about/licence/>)

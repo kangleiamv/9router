@@ -11,6 +11,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -20,13 +22,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import ai.ninerouter.core.HostRelease
 import ai.ninerouter.core.HostStorage
 import ai.ninerouter.core.HostedService
+import ai.ninerouter.core.NpmRuntime
 import ai.ninerouter.ui.components.AppTextField
 import ai.ninerouter.ui.components.PrimaryButton
+import ai.ninerouter.ui.theme.AppBorder
 import ai.ninerouter.ui.theme.AppSurface
+import ai.ninerouter.ui.theme.AppSurfaceHigh
 import ai.ninerouter.ui.theme.Brand
 import ai.ninerouter.ui.theme.Emerald
 import ai.ninerouter.ui.theme.Rose
@@ -127,13 +133,15 @@ private fun ReleaseRow(
 @Composable
 internal fun HostEnvDialog(
     service: HostedService,
-    onSave: (Map<String, String>, String) -> Unit,
+    onSave: (Map<String, String>, String, Boolean, Boolean) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var text by remember(service.id) {
         mutableStateOf(service.env.entries.joinToString("\n") { "${it.key}=${it.value}" })
     }
     var build by remember(service.id) { mutableStateOf(service.build) }
+    var npmInstall by remember(service.id) { mutableStateOf(service.npmInstall) }
+    var npmBuild by remember(service.id) { mutableStateOf(service.npmBuild) }
     var error by remember(service.id) { mutableStateOf<String?>(null) }
 
     AlertDialog(
@@ -166,8 +174,69 @@ internal fun HostEnvDialog(
                     onValueChange = { build = it },
                     label = "Build command (optional)",
                     placeholder = "npm install && npm run build",
-                    supportingText = "Runs inside the new release before it is activated.",
+                    supportingText = "Runs inside the new release before it is activated. " +
+                        "npm and npx are rewritten to the bundled CLI.",
                 )
+                if (service.kind == "node") {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        "npm · ${NpmRuntime.VERSION} bundled",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = TextPrimary,
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        "Deploy installs package.json dependencies and can run the build script. " +
+                            "The runtime port is detected from npm and child Node processes.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextMuted,
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Install dependencies", style = MaterialTheme.typography.titleSmall, color = TextPrimary)
+                            Text(
+                                "npm ci with a lockfile, otherwise npm install",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = TextMuted,
+                            )
+                        }
+                        Switch(
+                            checked = npmInstall,
+                            onCheckedChange = { npmInstall = it },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = Brand,
+                                checkedBorderColor = Brand,
+                                uncheckedThumbColor = TextSecondary,
+                                uncheckedTrackColor = AppSurfaceHigh,
+                                uncheckedBorderColor = AppBorder,
+                            ),
+                        )
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Run npm build", style = MaterialTheme.typography.titleSmall, color = TextPrimary)
+                            Text(
+                                "Only when package.json has a build script and no custom command is set",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = TextMuted,
+                            )
+                        }
+                        Switch(
+                            checked = npmBuild,
+                            onCheckedChange = { npmBuild = it },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = Brand,
+                                checkedBorderColor = Brand,
+                                uncheckedThumbColor = TextSecondary,
+                                uncheckedTrackColor = AppSurfaceHigh,
+                                uncheckedBorderColor = AppBorder,
+                            ),
+                        )
+                    }
+                }
                 error?.let {
                     Spacer(Modifier.height(6.dp))
                     Text(it, style = MaterialTheme.typography.labelSmall, color = Rose)
@@ -194,7 +263,7 @@ internal fun HostEnvDialog(
                     if (bad != null) {
                         error = bad
                     } else {
-                        onSave(env, build.trim())
+                        onSave(env, build.trim(), npmInstall, npmBuild)
                         onDismiss()
                     }
                 },

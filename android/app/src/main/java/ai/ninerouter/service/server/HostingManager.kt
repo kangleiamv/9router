@@ -13,6 +13,7 @@ import ai.ninerouter.core.HostingPlanner
 import ai.ninerouter.core.HostingRuntime
 import ai.ninerouter.core.HostingStore
 import ai.ninerouter.core.HostStorage
+import ai.ninerouter.core.NpmRuntime
 import android.content.Context
 import android.net.Uri
 import android.os.Build
@@ -78,6 +79,8 @@ object HostingManager {
         service.publicDir,
         service.active,
         service.build,
+        service.npmInstall.toString(),
+        service.npmBuild.toString(),
         service.env.entries.joinToString(",") { "${it.key}=${it.value}" },
     ).joinToString("|")
 
@@ -347,11 +350,24 @@ object HostingManager {
                             "or run it in Termux and publish it as a local link.",
                     )
                 }
+                val npmCli = if (spec.id == "node") {
+                    runCatching { NpmRuntime.ensure(app) }
+                        .onFailure {
+                            log(
+                                service.id,
+                                "npm is unavailable: ${it.message ?: it.javaClass.simpleName}",
+                            )
+                        }
+                        .getOrNull()
+                } else {
+                    null
+                }
                 val plan = HostingPlanner.plan(
                     service = effective,
                     layout = layout,
                     binaries = bins,
                     searchDirs = searchDirs(app),
+                    npmCli = npmCli,
                 )
                 if (spec.id == "postgres" || spec.id == "mysql") {
                     restrict(File(layout.root, "run"))
@@ -764,10 +780,49 @@ object HostingManager {
         try {
             source(stage)
             if (flatten) HostDeploy.flatten(stage)
-            if (service.build.isNotBlank()) runBuild(app, service, base, stage)
+            val npmCli = if (spec.id == "node" && File(stage, "package.json").isFile) {
+                runCatching { NpmRuntime.ensure(app) }.getOrElse {
+                    throw IllegalStateException(
+                        "This project has package.json but the bundled npm is unavailable: " +
+                            (it.message ?: it.javaClass.simpleName),
+                    )
+                }
+            } else {
+                null
+            }
+            val node = if (spec.id == "node") resolve(app, HostedKinds.node)["node"] else null
+            if (
+                npmCli != null &&
+                service.npmInstall &&
+                File(stage, "package.json").isFile &&
+                !File(stage, "node_modules").isDirectory &&
+                NpmRuntime.manifest(stage)?.needsInstall == true
+            ) {
+                runNpmInstall(app, service, base, stage, npmCli, node)
+            }
+            if (service.build.isNotBlank()) {
+                runBuild(app, service, base, stage, npmCli)
+            } else if (
+                npmCli != null &&
+                service.npmBuild &&
+                NpmRuntime.hasScript(stage, "build")
+            ) {
+                log(service.id, "package.json defines a build script; running npm run build")
+                runBuild(app, service, base, stage, npmCli, command = "npm run build")
+            }
             // Resolve these before the stage is renamed away.
             val detected = HostDeploy.detect(stage, spec.id)
-            val entry = HostDeploy.entryFor(stage, spec.id, service.entry)
+            // Keep the entry blank when npm owns startup, so the planner
+            // resolves scripts.start instead of forcing a guessed file.
+            val entry = if (
+                spec.id == "node" &&
+                service.entry.isBlank() &&
+                NpmRuntime.hasScript(stage, "start")
+            ) {
+                ""
+            } else {
+                HostDeploy.entryFor(stage, spec.id, service.entry)
+            }
             val final = File(releases, id)
             if (!stage.renameTo(final)) {
                 stage.copyRecursively(final, overwrite = true)
@@ -853,27 +908,91 @@ object HostingManager {
         service: HostedService,
         layout: HostLayout,
         dir: File,
+        npmCli: File?,
+        command: String = service.build,
     ) {
-        log(service.id, "Build: ${service.build}")
-        val builder = ProcessBuilder("/system/bin/sh", "-c", service.build)
+        val node = resolve(context.applicationContext, HostedKinds.node)["node"]
+        val resolved = NpmRuntime.rewriteShell(command, node, npmCli)
+        log(service.id, "Build: $command")
+        runTask(
+            context = context,
+            service = service,
+            layout = layout,
+            dir = dir,
+            program = "/system/bin/sh",
+            args = listOf("-c", resolved),
+            npmCli = npmCli,
+            label = "Build",
+            timeoutMinutes = 10,
+        )
+    }
+
+    /** Install package.json dependencies with the bundled npm CLI. */
+    private suspend fun runNpmInstall(
+        context: Context,
+        service: HostedService,
+        layout: HostLayout,
+        dir: File,
+        npmCli: File,
+        node: File?,
+    ) {
+        val program = node ?: throw IllegalStateException(
+            "Node.js is required to install npm dependencies.",
+        )
+        val args = NpmRuntime.installArgs(dir)
+        log(service.id, "npm ${args.joinToString(" ")}")
+        runTask(
+            context = context,
+            service = service,
+            layout = layout,
+            dir = dir,
+            program = program.absolutePath,
+            args = listOf(npmCli.absolutePath) + args,
+            npmCli = npmCli,
+            label = "npm install",
+            timeoutMinutes = 20,
+        )
+    }
+
+    private suspend fun runTask(
+        context: Context,
+        service: HostedService,
+        layout: HostLayout,
+        dir: File,
+        program: String,
+        args: List<String>,
+        npmCli: File?,
+        label: String,
+        timeoutMinutes: Long,
+    ) {
+        val builder = ProcessBuilder(listOf(program) + args)
             .directory(dir)
             .redirectErrorStream(true)
-        builder.environment().putAll(buildEnv(context, layout, service))
+        builder.environment().putAll(
+            buildEnv(context, layout, service, npmCli),
+        )
         val process = try {
             builder.start()
         } catch (t: Throwable) {
-            throw IllegalStateException("Could not run the build: ${t.message ?: t.javaClass.simpleName}")
+            throw IllegalStateException(
+                "Could not run $label: ${t.message ?: t.javaClass.simpleName}",
+            )
         }
         val pump = scope.launch { pumpLogs(service.id, process) }
         val code = runCatching {
-            if (process.waitFor(10, TimeUnit.MINUTES)) process.exitValue() else {
+            if (process.waitFor(timeoutMinutes, TimeUnit.MINUTES)) {
+                process.exitValue()
+            } else {
                 process.destroyForcibly()
                 -1
             }
         }.getOrDefault(-1)
         pump.join()
         if (code != 0) {
-            throw IllegalStateException("Build command exited with code $code.")
+            throw IllegalStateException(
+                "$label exited with code $code" +
+                    if (code == -1) " (timed out after $timeoutMinutes minutes)." else ".",
+            )
         }
     }
 
@@ -881,6 +1000,7 @@ object HostingManager {
         context: Context,
         layout: HostLayout,
         service: HostedService,
+        npmCli: File?,
     ): Map<String, String> {
         val dirs = searchDirs(context)
         val env = linkedMapOf(
@@ -893,6 +1013,7 @@ object HostingManager {
             env["LD_LIBRARY_PATH"] = dirs.joinToString(":") { it.absolutePath }
         }
         env.putAll(service.env)
+        NpmRuntime.applyEnvironment(env, npmCli, resolve(context, HostedKinds.node)["node"])
         return env
     }
 

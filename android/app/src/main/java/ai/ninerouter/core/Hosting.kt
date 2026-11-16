@@ -157,6 +157,10 @@ data class HostedService(
     val domain: String = "",
     /** MySQL schema created for this site, empty until the database is added. */
     val dbName: String = "",
+    /** Run `npm install`/`npm ci` when a deployment carries package.json. */
+    val npmInstall: Boolean = true,
+    /** Run `npm run build` when package.json defines a build script and no custom build is set. */
+    val npmBuild: Boolean = true,
 ) {
     val spec: HostedKind? get() = HostedKinds.byId(kind)
 
@@ -362,6 +366,7 @@ object HostingStore {
     val RESERVED_ENV = setOf(
         "PATH", "HOME", "TMPDIR", "LD_LIBRARY_PATH", "PORT", "HOST", "DOCROOT",
         "PWD", "NODE_ENV", "PGDATA", "LANG", "TZ", "ANDROID_DATA", "ANDROID_ROOT",
+        "NPM_CLI", "NODE_BIN",
     )
 
     private fun validateEnv(env: Map<String, String>): Map<String, String> {
@@ -461,6 +466,7 @@ object HostingPlanner {
         binaries: Map<String, File>,
         searchDirs: List<File> = emptyList(),
         systemPath: String = "/system/bin:/vendor/bin",
+        npmCli: File? = null,
     ): HostingPlan {
         val spec = HostedKinds.require(service.kind)
         fun bin(names: List<String>): File = names.firstNotNullOfOrNull { binaries[it] }
@@ -550,15 +556,24 @@ object HostingPlanner {
 
             "node" -> {
                 val entry = service.entry.ifBlank { "server.js" }
+                val manifest = NpmRuntime.manifest(layout.content)
+                // With no explicit entry, a package.json start script is the
+                // entrypoint. It must be resolved before the static fallback:
+                // frameworks rarely keep a file named server.js.
+                val npmEntry = manifest?.usesNpmStart == true &&
+                    service.entry.isBlank() &&
+                    npmCli != null
                 // A deployed release with no Node entry file is a static
                 // site. Serve it with the built-in server from `home` so the
                 // immutable release is never modified and switching releases
                 // does not carry a starter file between them.
                 val staticFallback =
-                    service.active.isNotBlank() && !File(layout.content, entry).isFile
+                    service.active.isNotBlank() && !npmEntry && !File(layout.content, entry).isFile
                 val starter = File(layout.home, "9router-static-server.js")
                 // Hook net.Server.listen so the app's real port is known even
-                // when it ignores PORT or calls listen(0).
+                // when it ignores PORT or calls listen(0). NODE_OPTIONS is
+                // inherited by every child Node process, including npm scripts
+                // and the frameworks they spawn.
                 val portAgent = File(layout.home, "9router-port.js")
                 val nodeOptions = env["NODE_OPTIONS"].orEmpty().trim()
                 env["NODE_OPTIONS"] = (if (nodeOptions.isEmpty()) "" else "$nodeOptions ") +
@@ -567,9 +582,19 @@ object HostingPlanner {
                 env["HOST"] = "127.0.0.1"
                 env["DOCROOT"] = layout.content.absolutePath
                 env["NODE_ENV"] = "production"
+                // An explicit entrypoint means "run this file". With no entry,
+                // a project that defines scripts.start runs `npm start`, so
+                // npm lifecycle scripts and dependency bins are available.
+                val useNpmStart = npmEntry && !staticFallback
+                val program = bin(spec.binaries)
+                NpmRuntime.applyEnvironment(env, npmCli, program)
                 HostingPlan(
-                    program = bin(spec.binaries),
-                    args = listOf(if (staticFallback) starter.absolutePath else entry),
+                    program = program,
+                    args = if (useNpmStart) {
+                        listOf(npmCli!!.absolutePath, "start", "--silent")
+                    } else {
+                        listOf(if (staticFallback) starter.absolutePath else entry)
+                    },
                     env = env,
                     workDir = layout.content,
                     files = buildMap {
@@ -577,7 +602,8 @@ object HostingPlanner {
                         put(portAgent, NODE_PORT_AGENT)
                     },
                     scaffold = if (
-                        !staticFallback && service.active.isBlank() && entry == "server.js"
+                        !staticFallback && !useNpmStart &&
+                        service.active.isBlank() && entry == "server.js"
                     ) {
                         mapOf(File(layout.content, "server.js") to NODE_SERVER)
                     } else {
@@ -789,22 +815,58 @@ code{background:#f1f5f9;padding:.15rem .4rem;border-radius:.35rem}</style></head
     /** Machine-readable line the injected Node agent writes on listen. */
     const val PORT_MARKER = "__9ROUTER_PORT__="
 
-    /** Port reported by [line], or null when it is not a port marker. */
+    /**
+     * Port reported by a Node process. The injected agent wins; npm and the
+     * frameworks it starts also print lines such as `Local: http://localhost:5173`
+     * or `listening on port 3000`, which cover builds that sanitise the
+     * environment. Values outside the non-privileged range are ignored so a
+     * duration or a year is never mistaken for a port.
+     */
     fun portFromLog(line: String): Int? {
-        if (!line.startsWith(PORT_MARKER)) return null
-        return line.removePrefix(PORT_MARKER)
-            .trim()
-            .toIntOrNull()
-            ?.takeIf { it in 1..65535 }
+        val text = line.trim()
+        if (text.startsWith(PORT_MARKER)) {
+            return text.removePrefix(PORT_MARKER)
+                .trim()
+                .toIntOrNull()
+                ?.takeIf { it in 1..65535 }
+        }
+        if (text.isEmpty()) return null
+        val url = URL_PORT.find(text)
+        if (url != null) return url.groupValues[1].toIntOrNull()?.takeIf { it in 1024..65535 }
+        val local = LOCAL_PORT.find(text)
+        if (local != null) return local.groupValues[1].toIntOrNull()?.takeIf { it in 1024..65535 }
+        val listening = LISTEN_PORT.find(text)
+        if (listening != null) {
+            return listening.groupValues[1].toIntOrNull()?.takeIf { it in 1024..65535 }
+        }
+        return null
     }
+
+    private val URL_PORT = Regex(
+        """https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]):(\d{4,5})(?:/|\b)""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val LOCAL_PORT = Regex(
+        """\b(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]):(\d{4,5})\b""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val LISTEN_PORT = Regex(
+        """\b(?:listening|listens|serving|running|started|available)\b[^\n]{0,48}?""" +
+            """\b(?:on|at|port)\b\s*(?:port\s*)?[:#]?\s*(\d{4,5})(?!\d|[-/]\d)""",
+        RegexOption.IGNORE_CASE,
+    )
 
     /**
      * Preloaded with `node --require` to report every listening server. Express
      * and plain `http` both end up in `net.Server.listen`, so this also catches
      * apps that hardcode a port or call `listen(0)`.
      */
-    private const val NODE_PORT_AGENT = """// 9Router: report the port this Node server listens on.
+    private const val NODE_PORT_AGENT = """// 9Router: report the port this Node server listens on, and make shell
+// scripts work on Android where only libnode.so is executable (no `node`).
 const net = require('net');
+const path = require('path');
+const child = require('child_process');
+
 const listen = net.Server.prototype.listen;
 net.Server.prototype.listen = function (...args) {
   this.once('listening', () => {
@@ -816,6 +878,63 @@ net.Server.prototype.listen = function (...args) {
     } catch (err) {}
   });
   return listen.apply(this, args);
+};
+
+const nodeBin = process.execPath;
+const quote = (value) => "'" + String(value).replace(/'/g, "'\\''") + "'";
+const quotedNode = quote(nodeBin);
+const npmCli = process.env.NPM_CLI || '';
+const npxCli = npmCli ? path.join(path.dirname(npmCli), 'npx-cli.js') : '';
+const rewriteToken = (source, name, replacement) => {
+  if (!source.includes(name)) return source;
+  const pattern = new RegExp(
+    '(^|[&;|(`]\\s*)((?:[A-Za-z_][A-Za-z0-9_]*=[^\\s;&|]+\\s+)*)' +
+      name + '(?=\\s|${'$'})',
+    'g',
+  );
+  return source.replace(
+    pattern,
+    (match, prefix, assignments) => prefix + assignments + replacement,
+  );
+};
+const rewrite = (source) => {
+  if (typeof source !== 'string') return source;
+  let out = rewriteToken(source, 'node', quotedNode);
+  if (npmCli) out = rewriteToken(out, 'npm', quotedNode + ' ' + quote(npmCli));
+  if (npxCli) out = rewriteToken(out, 'npx', quotedNode + ' ' + quote(npxCli));
+  return out;
+};
+const fixSpawn = (command, args, options) => {
+  if (typeof command !== 'string') return [command, args, options];
+  if (command === 'node') {
+    command = nodeBin;
+  } else if (command === 'npm' && npmCli) {
+    args = [npmCli].concat(Array.isArray(args) ? args : []);
+    command = nodeBin;
+  } else if (command === 'npx' && npxCli) {
+    args = [npxCli].concat(Array.isArray(args) ? args : []);
+    command = nodeBin;
+  } else if (options && options.shell) {
+    command = rewrite(command);
+  } else if (Array.isArray(args)) {
+    const index = args.indexOf('-c');
+    if (index >= 0 && typeof args[index + 1] === 'string') {
+      args = args.slice();
+      args[index + 1] = rewrite(args[index + 1]);
+    }
+  }
+  return [command, args, options];
+};
+
+const spawn = child.spawn;
+child.spawn = function (command, args, options) {
+  const fixed = fixSpawn(command, args, options);
+  return spawn.call(this, fixed[0], fixed[1], fixed[2]);
+};
+const spawnSync = child.spawnSync;
+child.spawnSync = function (command, args, options) {
+  const fixed = fixSpawn(command, args, options);
+  return spawnSync.call(this, fixed[0], fixed[1], fixed[2]);
 };
 """
 

@@ -98,7 +98,7 @@ internal fun HostingCard(
     onDeployFolder: (HostedService, Uri) -> Unit,
     onActivateRelease: (String, String) -> Unit,
     onDeleteRelease: (String, String) -> Unit,
-    onSaveEnvironment: (String, Map<String, String>, String) -> Unit,
+    onSaveEnvironment: (String, Map<String, String>, String, Boolean, Boolean) -> Unit,
 ) {
     val context = LocalContext.current
     var addOpen by remember { mutableStateOf(false) }
@@ -289,7 +289,9 @@ internal fun HostingCard(
         services.firstOrNull { it.id == id }?.let { service ->
             HostEnvDialog(
                 service = service,
-                onSave = { env, build -> onSaveEnvironment(service.id, env, build) },
+                onSave = { env, build, npmInstall, npmBuild ->
+                    onSaveEnvironment(service.id, env, build, npmInstall, npmBuild)
+                },
                 onDismiss = { envFor = null },
             )
         }

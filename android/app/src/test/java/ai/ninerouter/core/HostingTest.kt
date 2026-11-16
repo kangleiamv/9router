@@ -396,6 +396,26 @@ class HostingTest {
     }
 
     @Test
+    fun `a deployed static site serves its detected build folder`() {
+        val layout = layout()
+        val dist = File(layout.root, "releases/1000/dist").apply { mkdirs() }
+        File(dist, "index.html").writeText("<!doctype html>")
+        val deployed = service("static", 8080).copy(
+            active = "1000",
+            publicDir = "dist",
+            releases = listOf(HostRelease("1000", 1L, 1L)),
+        )
+        val plan = HostingPlanner.plan(
+            deployed,
+            layout.copy(content = dist),
+            binaries("node"),
+        )
+        assertEquals(dist.absolutePath, plan.env["DOCROOT"])
+        assertTrue(plan.files.keys.any { it.name == "9router-static-server.js" })
+        assertTrue(plan.scaffold.isEmpty())
+    }
+
+    @Test
     fun `tls environment is injected only when a pair exists`() {
         val layout = layout()
         val service = service("node", 3000)

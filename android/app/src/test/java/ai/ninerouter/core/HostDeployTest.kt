@@ -197,6 +197,23 @@ class HostDeployTest {
     }
 
     @Test
+    fun `detects a built folder for a static site`() {
+        val root = dir()
+        assertEquals("", HostDeploy.detect(root, "static").publicDir)
+
+        File(root, "build").mkdirs()
+        File(root, "build/index.html").writeText("<!doctype html>")
+        assertEquals("build", HostDeploy.detect(root, "static").publicDir)
+
+        File(root, "dist").mkdirs()
+        File(root, "dist/index.html").writeText("<!doctype html>")
+        assertEquals("dist", HostDeploy.detect(root, "static").publicDir)
+
+        File(root, "index.html").writeText("<!doctype html>")
+        assertEquals("", HostDeploy.detect(root, "static").publicDir)
+    }
+
+    @Test
     fun `detects the node entry from files or package json`() {
         val root = dir()
         File(root, "index.js").writeText("1")
@@ -223,6 +240,84 @@ class HostDeployTest {
 
         File(root, "server.js").writeText("1")
         assertEquals("server.js", HostDeploy.entryFor(root, "node", "server.js"))
+    }
+
+    @Test
+    fun `skips node_modules when dependencies will be installed`() {
+        val target = File(dir(), "release")
+        val tree = FakeTree(
+            nodes = mapOf(
+                "root" to listOf(
+                    HostFolderEntry("manifest", "package.json", false),
+                    HostFolderEntry("modules", "node_modules", true),
+                    HostFolderEntry("src", "src", true),
+                    HostFolderEntry("index", "index.js", false),
+                ),
+                "src" to listOf(HostFolderEntry("nested", "node_modules", true)),
+                "modules" to listOf(HostFolderEntry("dep", "dep", true)),
+                "nested" to listOf(HostFolderEntry("hidden", "x.js", false)),
+                "dep" to listOf(HostFolderEntry("left", "index.js", false)),
+            ),
+            contents = mapOf(
+                "manifest" to """{"dependencies":{"left-pad":"1"}}""".toByteArray(),
+                "index" to "require('left-pad')".toByteArray(),
+                "hidden" to "x".toByteArray(),
+                "left" to "module.exports = 1".toByteArray(),
+            ),
+        )
+        val copy = HostDeploy.importTree(tree, "root", target, skipNodeModules = true)
+        assertFalse(File(target, "node_modules").exists())
+        assertFalse(File(target, "src/node_modules").exists())
+        assertTrue(File(target, "index.js").isFile)
+        assertTrue(File(target, "package.json").isFile)
+        assertEquals(2, copy.files)
+        assertTrue(copy.skippedNodeModules)
+        assertEquals(2, copy.skipped)
+    }
+
+    @Test
+    fun `keeps node_modules without a package manifest`() {
+        val target = File(dir(), "release")
+        val tree = FakeTree(
+            nodes = mapOf(
+                "root" to listOf(
+                    HostFolderEntry("modules", "node_modules", true),
+                    HostFolderEntry("index", "index.html", false),
+                ),
+                "modules" to listOf(HostFolderEntry("dep", "dep", true)),
+                "dep" to listOf(HostFolderEntry("file", "index.js", false)),
+            ),
+            contents = mapOf(
+                "index" to "hi".toByteArray(),
+                "file" to "x".toByteArray(),
+            ),
+        )
+        val copy = HostDeploy.importTree(tree, "root", target, skipNodeModules = true)
+        assertTrue(File(target, "node_modules/dep/index.js").isFile)
+        assertTrue(File(target, "index.html").isFile)
+        assertFalse(copy.skippedNodeModules)
+    }
+
+    @Test
+    fun `reports folder copy progress and totals`() {
+        val target = File(dir(), "release")
+        val tree = FakeTree(
+            nodes = mapOf(
+                "root" to listOf(
+                    HostFolderEntry("one", "one.txt", false),
+                    HostFolderEntry("two", "two.txt", false),
+                ),
+            ),
+            contents = mapOf(
+                "one" to "12345".toByteArray(),
+                "two" to "ab".toByteArray(),
+            ),
+        )
+        val reports = mutableListOf<HostFolderCopy>()
+        val copy = HostDeploy.importTree(tree, "root", target) { reports += it }
+        assertEquals(2, copy.files)
+        assertEquals(7L, copy.bytes)
+        assertEquals(copy, reports.last())
     }
 
     @Test

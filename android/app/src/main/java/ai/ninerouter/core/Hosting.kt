@@ -5,6 +5,7 @@ import ai.ninerouter.util.Json
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import java.io.File
@@ -193,7 +194,12 @@ object HostingRuntime {
     }
 
     internal fun update(id: String, block: (HostServiceState) -> HostServiceState) {
-        set(id, block(state(id)))
+        // Deployment progress, log pumping and UI actions can update at the
+        // same time. Use the atomic flow update so none of them is lost.
+        _states.update { states ->
+            val current = states[id] ?: HostServiceState()
+            states + (id to block(current))
+        }
     }
 
     internal fun appendLog(id: String, line: String) {

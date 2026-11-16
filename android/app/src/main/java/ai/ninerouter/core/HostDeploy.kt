@@ -26,6 +26,14 @@ data class HostFolderEntry(
     val directory: Boolean,
 )
 
+/** Result of copying a folder chosen with the system picker. */
+data class HostFolderCopy(
+    val files: Int,
+    val bytes: Long,
+    val skipped: Int,
+    val skippedNodeModules: Boolean = false,
+)
+
 /** Folder access used by folder deployments; the app backs it with SAF. */
 interface HostFolderSource {
     fun children(parent: String): List<HostFolderEntry>
@@ -116,35 +124,110 @@ object HostDeploy {
      * Storage Access Framework hands out document URIs, not paths, so the
      * tree is copied into a staged release and then treated like a ZIP.
      * The chosen folder is the project root, so it is never flattened.
+     *
+     * When [skipNodeModules] is true and the root has a package.json, every
+     * node_modules folder is left out: npm rebuilds dependencies for this
+     * device. Copying a desktop node_modules through SAF is slow, can exceed
+     * the item cap and may contain binaries built for another CPU.
      */
-    fun importTree(resolver: ContentResolver, tree: Uri, target: File) {
+    fun importTree(
+        resolver: ContentResolver,
+        tree: Uri,
+        target: File,
+        skipNodeModules: Boolean = false,
+        onProgress: (HostFolderCopy) -> Unit = {},
+    ): HostFolderCopy {
         val rootId = runCatching { DocumentsContract.getTreeDocumentId(tree) }
-            .getOrElse { throw IllegalStateException("That folder cannot be read.") }
-        importTree(safSource(resolver, tree), rootId, target)
+            .getOrElse {
+                throw IllegalStateException(
+                    "That folder cannot be read. Choose the folder again.",
+                )
+            }
+        return importTree(
+            safSource(resolver, tree),
+            rootId,
+            target,
+            skipNodeModules,
+            onProgress,
+        )
     }
 
     /** Copy [source] below [target]; deletes [target] on any failure. */
-    internal fun importTree(source: HostFolderSource, rootId: String, target: File) {
+    internal fun importTree(
+        source: HostFolderSource,
+        rootId: String,
+        target: File,
+        skipNodeModules: Boolean = false,
+        onProgress: (HostFolderCopy) -> Unit = {},
+    ): HostFolderCopy {
         target.mkdirs()
         val base = target.canonicalFile
         var entries = 0
         var files = 0
+        var skipped = 0
+        var skippedModules = false
         var bytes = 0L
+        val topLevel = linkedMapOf<String, Int>()
 
-        fun walk(documentId: String, dir: File, depth: Int) {
+        // Read the root once. package.json decides whether node_modules can be
+        // rebuilt on this device, and the listing starts the first walk.
+        val rootChildren = source.children(rootId)
+        val npmProject = rootChildren.any {
+            !it.directory && it.name.trim() == "package.json"
+        }
+        val skipModules = skipNodeModules && npmProject
+
+        fun shown(file: File): String =
+            file.relativeToOrNull(base)?.path?.replace(File.separatorChar, '/')
+                ?.ifBlank { "." } ?: file.name
+
+        fun report() = onProgress(
+            HostFolderCopy(
+                files = files,
+                bytes = bytes,
+                skipped = skipped,
+                skippedNodeModules = skippedModules,
+            ),
+        )
+
+        fun walk(
+            documentId: String,
+            dir: File,
+            depth: Int,
+            top: String,
+            children: List<HostFolderEntry>? = null,
+        ) {
             if (depth > MAX_DEPTH) {
-                throw IllegalStateException("That folder nests folders too deeply.")
+                throw IllegalStateException(
+                    "The folder nests more than $MAX_DEPTH levels deep near '${shown(dir)}'.",
+                )
             }
-            source.children(documentId).forEach { entry ->
+            (children ?: source.children(documentId)).forEach { entry ->
                 val name = entry.name.replace('\\', '/').trim('/')
-                // .git can contain tens of thousands of objects and is never
-                // part of a hosted release. Skipping it also avoids leaking
-                // repository history if the site serves the release root.
-                if (name == ".git") return@forEach
+                // Never ship repository history. It is large, can exceed the
+                // item cap and must not be served from the release root.
+                if (name == ".git") {
+                    skipped++
+                    return@forEach
+                }
+                // npm projects reinstall dependencies on the device. This is
+                // faster than copying tens of thousands of SAF documents and
+                // avoids desktop (x64) native builds in node_modules.
+                if (skipModules && entry.directory && name == "node_modules") {
+                    skipped++
+                    skippedModules = true
+                    return@forEach
+                }
                 entries++
+                val bucket = top.ifBlank { name }
+                topLevel[bucket] = (topLevel[bucket] ?: 0) + 1
                 if (entries > MAX_ENTRIES) {
+                    val largest = topLevel.entries
+                        .sortedByDescending { it.value }
+                        .take(3)
+                        .joinToString { (key, count) -> "'${key.take(40)}' ($count)" }
                     throw IllegalStateException(
-                        "The folder has more than $MAX_ENTRIES items. " +
+                        "The folder has more than $MAX_ENTRIES items. Largest: $largest. " +
                             "Exclude node_modules or deploy a ZIP with only the needed files.",
                     )
                 }
@@ -156,42 +239,74 @@ object HostDeploy {
                 val file = File(dir, name)
                 val resolved = file.canonicalFile
                 if (resolved != base && !resolved.path.startsWith(base.path + File.separator)) {
-                    throw IllegalStateException("The folder contains an unsafe path: $name")
+                    throw IllegalStateException(
+                        "The folder contains an unsafe path: ${shown(file)}",
+                    )
                 }
                 if (entry.directory) {
-                    file.mkdirs()
-                    walk(entry.id, file, depth + 1)
+                    if (!file.mkdirs() && !file.isDirectory) {
+                        throw IllegalStateException("Could not create the folder '${shown(file)}'.")
+                    }
+                    walk(entry.id, file, depth + 1, bucket)
                 } else {
                     files++
                     file.parentFile?.mkdirs()
-                    val input = source.open(entry.id)
-                        ?: throw IllegalStateException("Could not read $name.")
+                    val path = shown(file)
+                    val input = runCatching { source.open(entry.id) }.getOrElse { failure ->
+                        throw IllegalStateException(
+                            "Could not read '$path': ${failure.readableMessage()}",
+                        )
+                    } ?: throw IllegalStateException(
+                        "Could not read '$path'. Choose the folder again and allow access.",
+                    )
                     input.use { src ->
-                        file.outputStream().use { output ->
-                            val buffer = ByteArray(64 * 1024)
-                            while (true) {
-                                val read = src.read(buffer)
-                                if (read <= 0) break
-                                bytes += read
-                                if (bytes > MAX_BYTES) {
-                                    throw IllegalStateException("The folder is larger than 200 MB.")
+                        runCatching {
+                            file.outputStream().use { output ->
+                                val buffer = ByteArray(64 * 1024)
+                                while (true) {
+                                    val read = src.read(buffer)
+                                    if (read <= 0) break
+                                    bytes += read
+                                    if (bytes > MAX_BYTES) {
+                                        throw IllegalStateException(
+                                            "The folder is larger than 200 MB (at '$path'). " +
+                                                "Exclude node_modules or deploy a ZIP with " +
+                                                "only the needed files.",
+                                        )
+                                    }
+                                    output.write(buffer, 0, read)
                                 }
-                                output.write(buffer, 0, read)
                             }
+                        }.getOrElse { failure ->
+                            if (failure is IllegalStateException) throw failure
+                            throw IllegalStateException(
+                                "Could not copy '$path': ${failure.readableMessage()}",
+                            )
                         }
                     }
                 }
+                if (entries % 256 == 0) report()
             }
         }
 
         try {
-            walk(rootId, target, 0)
-            if (files == 0) throw IllegalStateException("The folder has no files.")
+            walk(rootId, target, 0, "", rootChildren)
+            if (files == 0) {
+                throw IllegalStateException(
+                    "The folder has no files. Pick the project folder itself, " +
+                        "not an empty parent folder.",
+                )
+            }
+            report()
+            return HostFolderCopy(files, bytes, skipped, skippedModules)
         } catch (t: Throwable) {
             target.deleteRecursively()
             throw t
         }
     }
+
+    private fun Throwable.readableMessage(): String =
+        message?.takeIf { it.isNotBlank() } ?: javaClass.simpleName
 
     private fun safSource(resolver: ContentResolver, tree: Uri): HostFolderSource =
         object : HostFolderSource {
@@ -221,9 +336,15 @@ object HostDeploy {
                     val result = ArrayList<HostFolderEntry>()
                     while (it.moveToNext()) {
                         val id = it.getString(idAt) ?: continue
+                        // Some providers leave the display name empty. Fall
+                        // back to the document id instead of failing the copy.
+                        val display = it.getString(nameAt)?.trim().orEmpty()
+                        val fallback = id.substringAfterLast('/')
+                            .substringAfterLast(':')
+                            .trim()
                         result += HostFolderEntry(
                             id = id,
-                            name = it.getString(nameAt).orEmpty(),
+                            name = display.ifBlank { fallback },
                             directory = it.getString(typeAt) ==
                                 DocumentsContract.Document.MIME_TYPE_DIR,
                         )
@@ -261,6 +382,19 @@ object HostDeploy {
 
     /** Choose the folder and entrypoint for a runtime. */
     fun detect(dir: File, kind: String): HostAppLayout = when (kind) {
+        // A static deployment often carries a build output folder rather
+        // than an index at the root. Serve the first one that looks built.
+        "static" -> HostAppLayout(
+            publicDir = if (File(dir, "index.html").isFile) {
+                ""
+            } else {
+                listOf("dist", "build", "out", "public")
+                    .firstOrNull { File(dir, "$it/index.html").isFile }
+                    .orEmpty()
+            },
+            entry = "",
+        )
+
         "php" -> HostAppLayout(
             publicDir = if (File(dir, "public/index.php").isFile) "public" else "",
             entry = "",

@@ -40,6 +40,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -94,8 +95,8 @@ internal fun HostingCard(
     onStop: (String) -> Unit,
     onAutoStart: (String, Boolean) -> Unit,
     onPublish: (HostedService) -> Unit,
-    onDeploy: (HostedService, Uri) -> Unit,
-    onDeployFolder: (HostedService, Uri) -> Unit,
+    onDeploy: (String, Uri) -> Unit,
+    onDeployFolder: (String, Uri) -> Unit,
     onActivateRelease: (String, String) -> Unit,
     onDeleteRelease: (String, String) -> Unit,
     onSaveEnvironment: (String, Map<String, String>, String, Boolean, Boolean) -> Unit,
@@ -107,8 +108,9 @@ internal fun HostingCard(
     var filesFor by remember { mutableStateOf<String?>(null) }
     var releasesFor by remember { mutableStateOf<String?>(null) }
     var envFor by remember { mutableStateOf<String?>(null) }
-    var deployTarget by remember { mutableStateOf<String?>(null) }
-    var folderTarget by remember { mutableStateOf<String?>(null) }
+    // Save the id across activity recreation while the picker is in front.
+    var deployTarget by rememberSaveable { mutableStateOf<String?>(null) }
+    var folderTarget by rememberSaveable { mutableStateOf<String?>(null) }
     var storageTick by remember { mutableStateOf(0) }
     var usage by remember { mutableStateOf<Map<String, LongArray>>(emptyMap()) }
     var freeBytes by remember { mutableStateOf(0L) }
@@ -116,7 +118,7 @@ internal fun HostingCard(
     val deployPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uri ->
-        val target = deployTarget?.let { id -> services.firstOrNull { it.id == id } }
+        val target = deployTarget
         deployTarget = null
         if (uri != null && target != null) onDeploy(target, uri)
     }
@@ -124,7 +126,7 @@ internal fun HostingCard(
     val folderPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree(),
     ) { uri ->
-        val target = folderTarget?.let { id -> services.firstOrNull { it.id == id } }
+        val target = folderTarget
         folderTarget = null
         if (uri != null && target != null) onDeployFolder(target, uri)
     }
@@ -268,6 +270,8 @@ internal fun HostingCard(
             HostFilesDialog(
                 title = "${service.name} files",
                 root = HostingManager.layout(context, service).content,
+                release = service.active,
+                publicDir = service.publicDir,
                 onDismiss = { filesFor = null },
                 onChanged = { storageTick++ },
             )

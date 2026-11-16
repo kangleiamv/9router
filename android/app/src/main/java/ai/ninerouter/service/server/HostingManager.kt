@@ -757,7 +757,35 @@ object HostingManager {
         service: HostedService,
         tree: Uri,
     ): HostedService = deployInto(context, service, flatten = false) { stage ->
-        HostDeploy.importTree(context.contentResolver, tree, stage)
+        var lastReport = 0L
+        val copy = HostDeploy.importTree(
+            context.contentResolver,
+            tree,
+            stage,
+            // Node projects install their own dependencies. Copying a desktop
+            // node_modules through SAF is slow, can exceed the item cap, and
+            // may contain binaries built for another CPU.
+            skipNodeModules = service.kind == "node" && service.npmInstall,
+        ) { progress ->
+            val now = System.nanoTime()
+            if (now - lastReport >= 500_000_000L) {
+                lastReport = now
+                HostingRuntime.update(service.id) {
+                    it.copy(
+                        message = "Copying folder… ${progress.files} files, " +
+                            HostStorage.formatBytes(progress.bytes),
+                    )
+                }
+            }
+        }
+        log(
+            service.id,
+            "Copied ${copy.files} files (${HostStorage.formatBytes(copy.bytes)})" +
+                if (copy.skipped > 0) ", skipped ${copy.skipped} metadata folders" else "",
+        )
+        if (copy.skippedNodeModules) {
+            log(service.id, "Skipped node_modules; installing dependencies for this device.")
+        }
     }
 
     private suspend fun deployInto(
@@ -769,7 +797,7 @@ object HostingManager {
         val app = context.applicationContext
         val spec = HostedKinds.byId(service.kind)
             ?: throw IllegalStateException("Unknown runtime '${service.kind}'.")
-        if (spec.id !in setOf("php", "node", "python")) {
+        if (spec.id !in setOf("static", "php", "node", "python")) {
             throw IllegalStateException("${spec.label} cannot take a deployment; use a web runtime.")
         }
         val base = layout(app, service.id)
@@ -785,6 +813,19 @@ object HostingManager {
         try {
             source(stage)
             if (flatten) HostDeploy.flatten(stage)
+            // A ZIP may carry a node_modules built on a desktop. When the app
+            // is going to install dependencies anyway, discard it so the tree
+            // matches this device and does not waste release storage.
+            val bundledModules = File(stage, "node_modules")
+            if (
+                spec.id == "node" &&
+                service.npmInstall &&
+                File(stage, "package.json").isFile &&
+                bundledModules.exists()
+            ) {
+                log(service.id, "Ignoring bundled node_modules; npm install rebuilds it.")
+                bundledModules.deleteRecursively()
+            }
             val npmCli = if (spec.id == "node" && File(stage, "package.json").isFile) {
                 runCatching { NpmRuntime.ensure(app) }.getOrElse {
                     throw IllegalStateException(
@@ -804,6 +845,9 @@ object HostingManager {
                 !File(stage, "node_modules").isDirectory &&
                 NpmRuntime.manifest(stage)?.needsInstall == true
             ) {
+                HostingRuntime.update(service.id) {
+                    it.copy(message = "Installing dependencies with bundled npm…")
+                }
                 runNpmInstall(app, service, base, stage, npmCli, node)
             }
             if (service.build.isNotBlank()) {

@@ -61,7 +61,9 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonPrimitive
@@ -132,6 +134,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _busy = MutableStateFlow<Set<String>>(emptySet())
     val busy: StateFlow<Set<String>> = _busy.asStateFlow()
+
+    /**
+     * Sites with a ZIP or folder deploy in flight. Copying a large folder can
+     * take minutes; a second tap must not start a competing release, because
+     * both would read the same settings snapshot and the last one would win.
+     */
+    private val deployGuard = Any()
+    private val _deployingHosts = MutableStateFlow<Set<String>>(emptySet())
+    val deployingHosts: StateFlow<Set<String>> = _deployingHosts.asStateFlow()
 
     /** Bumped whenever a live model catalog changes, so Compose re-reads specs. */
     private val _catalogVersion = MutableStateFlow(0)
@@ -426,56 +437,107 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Replace one saved service and refresh the settings flow. */
-    private suspend fun persistHosted(updated: HostedService) {
+    private val persistHostedLock = Mutex()
+
+    /**
+     * Replace one saved service and refresh the settings flow. The whole
+     * read-modify-write is serialized: two sites can deploy at once, and a
+     * lost update would silently drop one of the releases.
+     */
+    private suspend fun persistHosted(updated: HostedService) = persistHostedLock.withLock {
         val current = HostingStore.decode(repo.getSetting(HostingStore.SETTINGS_KEY))
         val next = current.map { if (it.id == updated.id) updated else it }
         repo.putSetting(HostingStore.SETTINGS_KEY, HostingStore.encode(next))
         refreshSettings()
     }
 
+    private fun claimDeploy(id: String): Boolean = synchronized(deployGuard) {
+        if (id in _deployingHosts.value) {
+            false
+        } else {
+            _deployingHosts.value = _deployingHosts.value + id
+            true
+        }
+    }
+
+    private fun releaseDeploy(id: String) = synchronized(deployGuard) {
+        _deployingHosts.value = _deployingHosts.value - id
+    }
+
+    /**
+     * Hold on to the picker's read grant. A large folder copy can outlive the
+     * activity that received the result; without this the provider may revoke
+     * access mid-copy on low-memory devices.
+     */
+    private fun keepReadAccess(uri: Uri) {
+        runCatching {
+            getApplication<Application>().contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION,
+            )
+        }
+    }
+
     /** Upload a ZIP and turn it into a new release, like a platform deploy. */
     fun deployHostedService(id: String, uri: Uri) {
+        if (!claimDeploy(id)) {
+            emit("A deployment is already running for that site", true)
+            return
+        }
         val context = getApplication<Application>()
+        keepReadAccess(uri)
         viewModelScope.launch {
-            val service = HostingStore
-                .decode(repo.getSetting(HostingStore.SETTINGS_KEY))
-                .firstOrNull { it.id == id }
-            if (service == null) {
-                emit("That hosted service no longer exists", true)
-                return@launch
-            }
-            runCatching {
-                val input = context.contentResolver.openInputStream(uri)
-                    ?: error("Could not read the archive.")
-                input.use { HostingManager.deploy(context, service, it) }
-            }.onSuccess { updated ->
-                persistHosted(updated)
-                emit("${updated.name}: release ${updated.active} deployed")
-            }.onFailure {
-                emit(it.message ?: "Deployment failed", true)
+            try {
+                val service = HostingStore
+                    .decode(repo.getSetting(HostingStore.SETTINGS_KEY))
+                    .firstOrNull { it.id == id }
+                if (service == null) {
+                    emit("That hosted service no longer exists", true)
+                    return@launch
+                }
+                runCatching {
+                    val input = context.contentResolver.openInputStream(uri)
+                        ?: error("Could not read the archive. Choose it again.")
+                    input.use { HostingManager.deploy(context, service, it) }
+                }.onSuccess { updated ->
+                    persistHosted(updated)
+                    emit("${updated.name}: release ${updated.active} deployed")
+                }.onFailure {
+                    emit(it.message ?: "Deployment failed", true)
+                }
+            } finally {
+                releaseDeploy(id)
             }
         }
     }
 
     /** Copy a folder chosen with the system picker into a new release. */
     fun deployHostedFolder(id: String, uri: Uri) {
+        if (!claimDeploy(id)) {
+            emit("A deployment is already running for that site", true)
+            return
+        }
         val context = getApplication<Application>()
+        keepReadAccess(uri)
         viewModelScope.launch {
-            val service = HostingStore
-                .decode(repo.getSetting(HostingStore.SETTINGS_KEY))
-                .firstOrNull { it.id == id }
-            if (service == null) {
-                emit("That hosted service no longer exists", true)
-                return@launch
-            }
-            runCatching {
-                HostingManager.deployFolder(context, service, uri)
-            }.onSuccess { updated ->
-                persistHosted(updated)
-                emit("${updated.name}: folder hosted as release ${updated.active}")
-            }.onFailure {
-                emit(it.message ?: "Could not host that folder", true)
+            try {
+                val service = HostingStore
+                    .decode(repo.getSetting(HostingStore.SETTINGS_KEY))
+                    .firstOrNull { it.id == id }
+                if (service == null) {
+                    emit("That hosted service no longer exists", true)
+                    return@launch
+                }
+                runCatching {
+                    HostingManager.deployFolder(context, service, uri)
+                }.onSuccess { updated ->
+                    persistHosted(updated)
+                    emit("${updated.name}: folder hosted as release ${updated.active}")
+                }.onFailure {
+                    emit(it.message ?: "Could not host that folder. Choose it again.", true)
+                }
+            } finally {
+                releaseDeploy(id)
             }
         }
     }

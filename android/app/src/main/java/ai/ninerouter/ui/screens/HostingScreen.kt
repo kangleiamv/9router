@@ -59,6 +59,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -129,11 +130,15 @@ fun HostingScreen(viewModel: MainViewModel) {
     var domainFor by remember { mutableStateOf<HostedService?>(null) }
     var portFor by remember { mutableStateOf<HostedService?>(null) }
     var deleteFor by remember { mutableStateOf<HostedService?>(null) }
-    var filesFor by remember { mutableStateOf<HostedService?>(null) }
+    // Resolve from the newest list so a release deployed while the dialog is
+    // open (or right before it opens) is what Files actually shows.
+    var filesForId by remember { mutableStateOf<String?>(null) }
     var releasesFor by remember { mutableStateOf<HostedService?>(null) }
     var envFor by remember { mutableStateOf<HostedService?>(null) }
-    var deployFor by remember { mutableStateOf<HostedService?>(null) }
-    var folderFor by remember { mutableStateOf<HostedService?>(null) }
+    // Keep the target id, not the service object: DocumentsUI can recreate the
+    // activity, and a result must still deploy to the site that started it.
+    var deployForId by rememberSaveable { mutableStateOf<String?>(null) }
+    var folderForId by rememberSaveable { mutableStateOf<String?>(null) }
     var publishFor by remember { mutableStateOf<HostedService?>(null) }
 
     val ftpSettings = remember(settings[FtpHostStore.SETTINGS_KEY]) {
@@ -148,16 +153,16 @@ fun HostingScreen(viewModel: MainViewModel) {
     val deployPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uri ->
-        val target = deployFor
-        deployFor = null
-        if (uri != null && target != null) viewModel.deployHostedService(target.id, uri)
+        val target = deployForId
+        deployForId = null
+        if (uri != null && target != null) viewModel.deployHostedService(target, uri)
     }
     val folderPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree(),
     ) { uri ->
-        val target = folderFor
-        folderFor = null
-        if (uri != null && target != null) viewModel.deployHostedFolder(target.id, uri)
+        val target = folderForId
+        folderForId = null
+        if (uri != null && target != null) viewModel.deployHostedFolder(target, uri)
     }
 
     fun openUrl(url: String) {
@@ -194,9 +199,15 @@ fun HostingScreen(viewModel: MainViewModel) {
                         }
                     },
                     onOpen = { openUrl("http://127.0.0.1:${effectivePort(it, states[it.id] ?: HostServiceState())}/") },
-                    onFiles = { filesFor = it },
-                    onDeploy = { deployFor = it; deployPicker.launch(arrayOf("application/zip")) },
-                    onFolder = { folderFor = it; folderPicker.launch(null) },
+                    onFiles = { filesForId = it.id },
+                    onDeploy = {
+                        deployForId = it.id
+                        deployPicker.launch(arrayOf("application/zip"))
+                    },
+                    onFolder = {
+                        folderForId = it.id
+                        folderPicker.launch(null)
+                    },
                 )
 
                 "databases" -> DatabasesTab(viewModel, services, states)
@@ -205,7 +216,7 @@ fun HostingScreen(viewModel: MainViewModel) {
 
                 "ssl" -> SslTab(viewModel, services)
 
-                "storage" -> StorageTab(services, states, onFiles = { filesFor = it })
+                "storage" -> StorageTab(services, states, onFiles = { filesForId = it.id })
 
                 else -> OverviewTab(
                     services = services,
@@ -249,16 +260,16 @@ fun HostingScreen(viewModel: MainViewModel) {
             onOpen = {
                 openUrl("http://127.0.0.1:${effectivePort(manage, states[manage.id] ?: HostServiceState())}/")
             },
-            onFiles = { filesFor = manage; manageId = null },
+            onFiles = { filesForId = manage.id; manageId = null },
             onReleases = { releasesFor = manage; manageId = null },
             onEnvironment = { envFor = manage; manageId = null },
             onDeploy = {
-                deployFor = manage
+                deployForId = manage.id
                 manageId = null
                 deployPicker.launch(arrayOf("application/zip"))
             },
             onFolder = {
-                folderFor = manage
+                folderForId = manage.id
                 manageId = null
                 folderPicker.launch(null)
             },
@@ -296,17 +307,20 @@ fun HostingScreen(viewModel: MainViewModel) {
         )
     }
 
-    if (filesFor != null) {
-        val target = filesFor!!
-        val root = remember(target.id, target.active) {
-            HostingManager.layout(context, target).content
+    filesForId?.let { id ->
+        services.firstOrNull { it.id == id }?.let { target ->
+            val root = remember(target.id, target.active, target.publicDir) {
+                HostingManager.layout(context, target).content
+            }
+            HostFilesDialog(
+                title = "${target.name} · files",
+                root = root,
+                release = target.active,
+                publicDir = target.publicDir,
+                onDismiss = { filesForId = null },
+                onChanged = { viewModel.refreshSettings() },
+            )
         }
-        HostFilesDialog(
-            title = "${target.name} · files",
-            root = root,
-            onDismiss = { filesFor = null },
-            onChanged = { viewModel.refreshSettings() },
-        )
     }
 
     if (releasesFor != null) {
@@ -767,6 +781,15 @@ private fun SiteCard(
             }
         }
 
+        if (state.message.isNotBlank()) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                state.message,
+                style = MaterialTheme.typography.labelSmall,
+                color = if (state.status == HostStatus.ERROR) Rose else TextMuted,
+            )
+        }
+
         if (service.spec?.web == true) {
             Spacer(Modifier.height(8.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -919,6 +942,15 @@ private fun SiteManageDialog(
                         enabled = running && service.spec?.web == true,
                         icon = Icons.Filled.OpenInNew,
                         modifier = Modifier.weight(1f),
+                    )
+                }
+
+                if (state.message.isNotBlank()) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        state.message,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (state.status == HostStatus.ERROR) Rose else TextMuted,
                     )
                 }
 

@@ -34,6 +34,7 @@ import ai.ninerouter.core.HostFileEntry
 import ai.ninerouter.core.HostStorage
 import ai.ninerouter.ui.components.AppTextField
 import ai.ninerouter.ui.components.PrimaryButton
+import ai.ninerouter.ui.theme.Amber
 import ai.ninerouter.ui.theme.AppSurface
 import ai.ninerouter.ui.theme.Brand
 import ai.ninerouter.ui.theme.Rose
@@ -55,6 +56,8 @@ private const val MAX_UPLOAD_BYTES = 64L * 1024 * 1024
 internal fun HostFilesDialog(
     title: String,
     root: File,
+    release: String = "",
+    publicDir: String = "",
     onDismiss: () -> Unit,
     onChanged: () -> Unit,
 ) {
@@ -137,11 +140,34 @@ internal fun HostFilesDialog(
         text = {
             Column {
                 Text(
-                    if (path.isBlank()) "Hosted files · public" else "public/$path",
+                    when {
+                        release.isBlank() -> "Starter folder · no release deployed"
+                        publicDir.isBlank() -> "Release $release · root"
+                        else -> "Release $release · $publicDir"
+                    },
                     style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-                    color = TextMuted,
+                    color = if (release.isBlank()) Amber else TextMuted,
                     maxLines = 2,
                 )
+                if (path.isNotBlank()) {
+                    Text(
+                        if (release.isBlank()) "public/$path" else {
+                            if (publicDir.isBlank()) path else "${publicDir.trim('/')}/$path"
+                        },
+                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                        color = TextMuted,
+                        maxLines = 2,
+                    )
+                }
+                if (release.isBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Only the built-in starter lives here. Deploy a folder or ZIP from " +
+                            "the site card; once it finishes, reopen Files to see that release.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextMuted,
+                    )
+                }
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     TextButton(onClick = { picker.launch(arrayOf("*/*")) }) {

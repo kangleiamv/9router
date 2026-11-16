@@ -70,10 +70,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.23>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.24>.
 
 ```bash
-adb install -r 9router-android-1.3.23-debug.apk
+adb install -r 9router-android-1.3.24-debug.apk
 ```
 
 The APK is about 98 MB because it carries the arm64 hosting runtimes. It builds
@@ -548,9 +548,16 @@ back to any of the last five.
    tap **Host folder** and choose a folder with the system folder picker.
 2. The archive is extracted, or the selected folder is copied, into
    `files/hosting/<id>/releases/<timestamp>` (200 MB and 50,000 items at
-   most). `.git` metadata is skipped for ZIPs and folders. A single wrapper
-   folder such as `my-app/` is flattened for ZIPs;
-   a selected folder is used exactly as picked, because you chose its root.
+   most). `.git` metadata is skipped for ZIPs and folders. For a Node.js
+   folder whose root has `package.json`, every `node_modules` folder is also
+   skipped while **Install dependencies** is on: desktop dependencies are
+   often tens of thousands of files and may contain binaries built for another
+   CPU, so npm installs the correct tree inside the release instead. ZIPs with
+   a bundled `node_modules` get the same treatment. A single wrapper folder
+   such as `my-app/` is flattened for ZIPs; a selected folder is used exactly
+   as picked, because you chose its root.
+   The card and the **Manage** dialog show `Copying folder… N files, X MB`
+   while the tree is copied, then dependency-install and build progress.
    `.stage-*` folders are removed if a deploy fails.
    The folder is copied, not linked, so editing the original later does not
    change the site until it is hosted again.
@@ -578,6 +585,9 @@ back to any of the last five.
 
 A Node.js release with no entry file is served statically with its
 `index.html`, so folder deployments of plain HTML sites need no server code.
+A **Static site** also accepts ZIP and folder deploys: when the root has no
+`index.html`, the app serves `dist/`, `build/`, `out/` or `public/`, whichever
+contains a built `index.html` first.
 If a saved entrypoint is missing from a release (for example after upgrading
 from a build that guessed `server.js`), the app re-detects the entrypoint at
 startup instead of crash-looping.
@@ -591,8 +601,11 @@ runtime defaults and survive restarts; `PORT`, `HOST`, `DOCROOT`, `PATH`,
 stay owned by the runtime. At most 32 variables are allowed.
 
 The **Files** button and the **storage** row follow the active release, so
-editing a file changes exactly what is being served. Deploying an archive or
-folder does not touch database folders.
+editing a file changes exactly what is being served. The dialog header names
+the release and served folder; when no release is active it says
+`Starter folder · no release deployed` instead of presenting the built-in
+starter as your upload. Deploying an archive or folder does not touch database
+folders.
 
 Processes bind loopback only and are supervised: output is captured (the card
 shows the tail), an unexpected exit restarts up to three times with a backoff,

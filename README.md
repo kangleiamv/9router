@@ -106,15 +106,16 @@ quota tracking and the Telegram bot. Every screen is Compose — there is no
 WebView and no demo build.
 
 Download the debug APK from
-[Releases](https://github.com/kangleiamv/9router/releases/tag/android-v1.3.16),
-then `adb install -r 9router-android-1.3.16-debug.apk` (or open the file on the
+[Releases](https://github.com/kangleiamv/9router/releases/tag/android-v1.3.17),
+then `adb install -r 9router-android-1.3.17-debug.apk` (or open the file on the
 device). Build instructions are in [`android/README.md`](./android/README.md).
 The Providers screen mirrors the web registry with bundled logos, and the
 **Models** button discovers each provider's live catalog and caches it for
 pickers, combos and `/v1/models`. The hosting card doubles as a small
-Vercel-style platform: PHP, Node.js and Python services take ZIP deployments,
-keep the last five immutable releases, expose per-service environment
-variables and an optional build command, and support activate/rollback. Antigravity, Gemini CLI and Claude Code can be
+Vercel-style platform: PHP, Node.js and Python services take ZIP uploads or a
+folder picked from the device, keep the last five immutable releases, expose
+per-service environment variables and an optional build command, and support
+activate/rollback. Antigravity, Gemini CLI and Claude Code can be
 connected with a real OAuth sign-in from the Providers screen, and any
 OpenAI/Anthropic-compatible endpoint can be added as a custom provider with its
 own model prefix.

@@ -14,6 +14,7 @@ import ai.ninerouter.core.HostingRuntime
 import ai.ninerouter.core.HostingStore
 import ai.ninerouter.core.HostStorage
 import android.content.Context
+import android.net.Uri
 import android.os.Build
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -661,6 +662,28 @@ object HostingManager {
         context: Context,
         service: HostedService,
         zip: InputStream,
+    ): HostedService = deployInto(context, service, flatten = true) { stage ->
+        HostDeploy.extract(zip, stage)
+    }
+
+    /**
+     * Host a folder chosen with the system folder picker. The folder is
+     * copied into a release first, so later edits in the original folder do
+     * not change what is being served until it is hosted again.
+     */
+    suspend fun deployFolder(
+        context: Context,
+        service: HostedService,
+        tree: Uri,
+    ): HostedService = deployInto(context, service, flatten = false) { stage ->
+        HostDeploy.importTree(context.contentResolver, tree, stage)
+    }
+
+    private suspend fun deployInto(
+        context: Context,
+        service: HostedService,
+        flatten: Boolean,
+        source: (File) -> Unit,
     ): HostedService = withContext(Dispatchers.IO) {
         val app = context.applicationContext
         val spec = HostedKinds.byId(service.kind)
@@ -679,10 +702,12 @@ object HostingManager {
         HostingRuntime.update(service.id) { it.copy(message = "Deploying release $id…") }
         log(service.id, "Deploying release $id…")
         try {
-            HostDeploy.extract(zip, stage)
-            HostDeploy.flatten(stage)
+            source(stage)
+            if (flatten) HostDeploy.flatten(stage)
             if (service.build.isNotBlank()) runBuild(app, service, base, stage)
+            // Resolve these before the stage is renamed away.
             val detected = HostDeploy.detect(stage, spec.id)
+            val entry = HostDeploy.entryFor(stage, spec.id, service.entry)
             val final = File(releases, id)
             if (!stage.renameTo(final)) {
                 stage.copyRecursively(final, overwrite = true)
@@ -695,7 +720,7 @@ object HostingManager {
                 releases = kept,
                 active = id,
                 publicDir = detected.publicDir,
-                entry = HostDeploy.entryFor(stage, spec.id, service.entry),
+                entry = entry,
             )
             val keep = kept.map { it.id }.toSet()
             releases.listFiles()

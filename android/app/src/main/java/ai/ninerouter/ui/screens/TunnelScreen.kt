@@ -452,6 +452,9 @@ fun TunnelScreen(viewModel: MainViewModel) {
                         }
                     },
                     onDeploy = { service, uri -> viewModel.deployHostedService(service.id, uri) },
+                    onDeployFolder = { service, uri ->
+                        viewModel.deployHostedFolder(service.id, uri)
+                    },
                     onActivateRelease = { id, release ->
                         viewModel.activateHostedRelease(id, release)
                     },

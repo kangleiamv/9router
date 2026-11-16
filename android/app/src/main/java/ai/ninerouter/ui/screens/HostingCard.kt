@@ -95,6 +95,7 @@ internal fun HostingCard(
     onAutoStart: (String, Boolean) -> Unit,
     onPublish: (HostedService) -> Unit,
     onDeploy: (HostedService, Uri) -> Unit,
+    onDeployFolder: (HostedService, Uri) -> Unit,
     onActivateRelease: (String, String) -> Unit,
     onDeleteRelease: (String, String) -> Unit,
     onSaveEnvironment: (String, Map<String, String>, String) -> Unit,
@@ -107,6 +108,7 @@ internal fun HostingCard(
     var releasesFor by remember { mutableStateOf<String?>(null) }
     var envFor by remember { mutableStateOf<String?>(null) }
     var deployTarget by remember { mutableStateOf<String?>(null) }
+    var folderTarget by remember { mutableStateOf<String?>(null) }
     var storageTick by remember { mutableStateOf(0) }
     var usage by remember { mutableStateOf<Map<String, LongArray>>(emptyMap()) }
     var freeBytes by remember { mutableStateOf(0L) }
@@ -117,6 +119,14 @@ internal fun HostingCard(
         val target = deployTarget?.let { id -> services.firstOrNull { it.id == id } }
         deployTarget = null
         if (uri != null && target != null) onDeploy(target, uri)
+    }
+
+    val folderPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree(),
+    ) { uri ->
+        val target = folderTarget?.let { id -> services.firstOrNull { it.id == id } }
+        folderTarget = null
+        if (uri != null && target != null) onDeployFolder(target, uri)
     }
 
     LaunchedEffect(services, storageTick) {
@@ -231,6 +241,10 @@ internal fun HostingCard(
                         ),
                     )
                 },
+                onDeployFolder = {
+                    folderTarget = service.id
+                    folderPicker.launch(null as Uri?)
+                },
                 onReleases = { releasesFor = service.id },
                 onEnv = { envFor = service.id },
                 usage = usage[service.id],
@@ -333,6 +347,7 @@ private fun ServiceRow(
     onPublish: () -> Unit,
     onFiles: () -> Unit,
     onDeploy: () -> Unit,
+    onDeployFolder: () -> Unit,
     onReleases: () -> Unit,
     onEnv: () -> Unit,
     usage: LongArray?,
@@ -447,6 +462,11 @@ private fun ServiceRow(
                 TextButton(onClick = onDeploy) {
                     Text("Deploy ZIP", color = Brand, style = MaterialTheme.typography.labelMedium)
                 }
+                TextButton(onClick = onDeployFolder) {
+                    Text("Host folder", color = Brand, style = MaterialTheme.typography.labelMedium)
+                }
+            }
+            Row {
                 TextButton(onClick = onReleases) {
                     Text(
                         "Releases ${service.releases.size}",

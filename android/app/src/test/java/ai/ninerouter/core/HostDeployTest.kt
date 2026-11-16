@@ -6,6 +6,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.InputStream
 import java.nio.file.Files
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
@@ -64,6 +65,64 @@ class HostDeployTest {
             )
         }.exceptionOrNull()
         assertTrue(failure is IllegalStateException)
+    }
+
+    private class FakeTree(
+        private val nodes: Map<String, List<HostFolderEntry>>,
+        private val contents: Map<String, ByteArray>,
+    ) : HostFolderSource {
+        override fun children(parent: String): List<HostFolderEntry> =
+            nodes[parent].orEmpty()
+
+        override fun open(document: String): InputStream? =
+            contents[document]?.inputStream()
+    }
+
+    @Test
+    fun `copies a selected folder without flattening its layout`() {
+        val target = File(dir(), "release")
+        val tree = FakeTree(
+            nodes = mapOf(
+                "root" to listOf(
+                    HostFolderEntry("assets", "assets", true),
+                    HostFolderEntry("index", "index.php", false),
+                ),
+                "assets" to listOf(HostFolderEntry("css", "app.css", false)),
+            ),
+            contents = mapOf(
+                "index" to "<?php echo 1;".toByteArray(),
+                "css" to "body{}".toByteArray(),
+            ),
+        )
+        HostDeploy.importTree(tree, "root", target)
+        assertTrue(File(target, "index.php").isFile)
+        assertTrue(File(target, "assets/app.css").isFile)
+    }
+
+    @Test
+    fun `rejects unsafe folder names and clears the release`() {
+        val target = File(dir(), "release")
+        val tree = FakeTree(
+            nodes = mapOf("root" to listOf(HostFolderEntry("x", "..", false))),
+            contents = mapOf("x" to "no".toByteArray()),
+        )
+        val failure = runCatching { HostDeploy.importTree(tree, "root", target) }
+            .exceptionOrNull()
+        assertTrue(failure is IllegalStateException)
+        assertFalse(target.exists())
+    }
+
+    @Test
+    fun `rejects a selected folder with no files`() {
+        val target = File(dir(), "release")
+        val tree = FakeTree(
+            nodes = mapOf("root" to listOf(HostFolderEntry("empty", "empty", true))),
+            contents = emptyMap(),
+        )
+        val failure = runCatching { HostDeploy.importTree(tree, "root", target) }
+            .exceptionOrNull()
+        assertTrue(failure is IllegalStateException)
+        assertFalse(target.exists())
     }
 
     @Test

@@ -446,6 +446,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Copy a folder chosen with the system picker into a new release. */
+    fun deployHostedFolder(id: String, uri: Uri) {
+        val context = getApplication<Application>()
+        viewModelScope.launch {
+            val service = HostingStore
+                .decode(repo.getSetting(HostingStore.SETTINGS_KEY))
+                .firstOrNull { it.id == id }
+            if (service == null) {
+                emit("That hosted service no longer exists", true)
+                return@launch
+            }
+            runCatching {
+                HostingManager.deployFolder(context, service, uri)
+            }.onSuccess { updated ->
+                persistHosted(updated)
+                emit("${updated.name}: folder hosted as release ${updated.active}")
+            }.onFailure {
+                emit(it.message ?: "Could not host that folder", true)
+            }
+        }
+    }
+
     /** Serve another release and restart the process if it is running. */
     fun activateHostedRelease(id: String, releaseId: String) {
         val context = getApplication<Application>()

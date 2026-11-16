@@ -68,10 +68,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.16>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.17>.
 
 ```bash
-adb install -r 9router-android-1.3.16-debug.apk
+adb install -r 9router-android-1.3.17-debug.apk
 ```
 
 The APK is about 98 MB because it carries the arm64 hosting runtimes. It builds
@@ -418,7 +418,8 @@ folder used before the first deploy, `data` for database files, and `home`,
 
 Each service row also shows its **storage**: the size of its code, database and
 log folders plus the free space left on the device, and a **Files** button that
-opens the code folder (`files/hosting/<id>/public`) in a small file manager:
+opens the active code folder (`files/hosting/<id>/releases/<timestamp>`, or the
+legacy `public` folder before the first deploy) in a small file manager:
 
 - browse folders, open a text or code file in the in-app editor and save it;
 - upload a file with the system picker (up to 64 MB);
@@ -429,16 +430,21 @@ Uploads and edits are written through a temporary sibling file, so a crash
 cannot truncate a served file. Paths are resolved below the service folder and
 `..`, absolute paths and symlink escapes are refused.
 
-#### Deployments (ZIP → release → activate)
+#### Deployments (ZIP or folder → release → activate)
 
-Web runtimes work like a small Vercel/Render: upload a project archive, get an
-immutable release, then serve or roll back to any of the last five.
+Web runtimes work like a small Vercel/Render: upload a project archive or pick
+a folder already on the device, get an immutable release, then serve or roll
+back to any of the last five.
 
-1. Tap **Deploy ZIP** on a PHP, Node.js or Python service and pick a `.zip`.
-2. The archive is extracted into `files/hosting/<id>/releases/<timestamp>`
-   (200 MB and 5,000 entries at most). A single wrapper folder such as
-   `my-app/` is flattened, and `.stage-*` folders are removed if a deploy
-   fails.
+1. Tap **Deploy ZIP** on a PHP, Node.js or Python service and pick a `.zip`, or
+   tap **Host folder** and choose a folder with the system folder picker.
+2. The archive is extracted, or the selected folder is copied, into
+   `files/hosting/<id>/releases/<timestamp>` (200 MB and 5,000 entries at
+   most). A single wrapper folder such as `my-app/` is flattened for ZIPs;
+   a selected folder is used exactly as picked, because you chose its root.
+   `.stage-*` folders are removed if a deploy fails.
+   The folder is copied, not linked, so editing the original later does not
+   change the site until it is hosted again.
 3. If the service has a **build command**, it runs inside the new release via
    `/system/bin/sh -c` before activation. npm is not bundled, so vendor
    `node_modules` in the archive or use a build step that only needs the
@@ -458,8 +464,8 @@ restarts; `PORT`, `HOST`, `DOCROOT`, `PATH`, `LD_LIBRARY_PATH`, `HOME`,
 by the runtime. At most 32 variables are allowed.
 
 The **Files** button and the **storage** row follow the active release, so
-editing a file changes exactly what is being served. Deploying an archive does
-not touch database folders.
+editing a file changes exactly what is being served. Deploying an archive or
+folder does not touch database folders.
 
 Processes bind loopback only and are supervised: output is captured (the card
 shows the tail), an unexpected exit restarts up to three times with a backoff,

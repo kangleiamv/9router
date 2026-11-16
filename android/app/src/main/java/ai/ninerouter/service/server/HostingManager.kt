@@ -419,6 +419,9 @@ object HostingManager {
                     null
                 }
                 NpmRuntime.installShims(app, bins["node"], npmCli)
+                if (spec.id == "node") {
+                    prepareNodeRelease(app, effective, layout, npmCli, bins["node"])
+                }
                 val plan = HostingPlanner.plan(
                     service = effective,
                     layout = layout,
@@ -920,15 +923,27 @@ object HostingManager {
                 }
                 runNpmInstall(app, service, base, stage, npmCli, node)
             }
-            if (service.build.isNotBlank()) {
-                runBuild(app, service, base, stage, npmCli)
-            } else if (
+            if (npmCli != null && node != null && service.npmInstall) {
+                ensureNextWasm(app, service, base, stage, npmCli, node)
+            }
+            val buildCommand = when {
+                service.build.isNotBlank() -> service.build
                 npmCli != null &&
-                service.npmBuild &&
-                NpmRuntime.hasScript(stage, "build")
-            ) {
-                log(service.id, "package.json defines a build script; running npm run build")
-                runBuild(app, service, base, stage, npmCli, command = "npm run build")
+                    service.npmBuild &&
+                    NpmRuntime.hasScript(stage, "build") -> {
+                    log(
+                        service.id,
+                        "package.json defines a build script; running " +
+                            NpmRuntime.buildCommand(stage),
+                    )
+                    NpmRuntime.buildCommand(stage)
+                }
+
+                else -> null
+            }
+            if (buildCommand != null) {
+                runBuild(app, service, base, stage, npmCli, command = buildCommand)
+                markBuilt(buildMarker(base, id), buildCommand)
             }
             // Resolve these before the stage is renamed away.
             val detected = HostDeploy.detect(stage, spec.id)
@@ -1022,6 +1037,120 @@ object HostingManager {
         }
     }
 
+    /**
+     * A recovered release may predate a successful dependency install/build,
+     * and an older deploy may have skipped the build entirely. Prepare it once
+     * before starting npm; the marker lives outside the immutable release.
+     */
+    private suspend fun prepareNodeRelease(
+        context: Context,
+        service: HostedService,
+        layout: HostLayout,
+        npmCli: File?,
+        node: File?,
+    ) {
+        if (service.active.isBlank() || npmCli == null || node == null) return
+        val dir = layout.content
+        val manifest = NpmRuntime.manifest(dir) ?: return
+        if (
+            service.npmInstall &&
+            manifest.needsInstall &&
+            !File(dir, "node_modules").isDirectory
+        ) {
+            HostingRuntime.update(service.id) {
+                it.copy(message = "Installing dependencies for release ${service.active}…")
+            }
+            runNpmInstall(context, service, layout, dir, npmCli, node)
+        }
+        if (service.npmInstall) {
+            ensureNextWasm(context, service, layout, dir, npmCli, node)
+        }
+        val command = when {
+            service.build.isNotBlank() -> service.build
+            service.npmBuild && manifest.build.isNotBlank() -> NpmRuntime.buildCommand(dir)
+            else -> {
+                requireNextBuild(manifest, dir)
+                return
+            }
+        }
+        val marker = buildMarker(layout, service.active)
+        if (marker.isFile && marker.readText() == command) {
+            requireNextBuild(manifest, dir)
+            return
+        }
+        HostingRuntime.update(service.id) {
+            it.copy(message = "Building release ${service.active}…")
+        }
+        runBuild(context, service, layout, dir, npmCli, command)
+        requireNextBuild(manifest, dir)
+        markBuilt(marker, command)
+    }
+
+    /** Refuse a `next start` that has no production build instead of looping. */
+    private fun requireNextBuild(manifest: NpmRuntime.Manifest, dir: File) {
+        val tokens = manifest.start.split(Regex("\\s+"))
+        val nextStart = "start" in tokens && tokens.any { it.contains("next") }
+        if (nextStart && !File(dir, ".next/BUILD_ID").isFile) {
+            throw IllegalStateException(
+                "Next.js needs a production build, but .next is missing. " +
+                    "Turn on Run npm build or set a build command that creates .next.",
+            )
+        }
+    }
+
+    private fun buildMarker(layout: HostLayout, releaseId: String): File =
+        File(layout.root, ".build-$releaseId")
+
+    private fun markBuilt(marker: File, command: String) {
+        runCatching {
+            marker.parentFile?.mkdirs()
+            marker.writeText(command)
+        }
+    }
+
+    /**
+     * Next 16 needs a wasm SWC binding on android/arm64. Install the matching
+     * package when it is not already in the project, so the first build does
+     * not depend on Next's on-demand download.
+     */
+    private suspend fun ensureNextWasm(
+        context: Context,
+        service: HostedService,
+        layout: HostLayout,
+        dir: File,
+        npmCli: File,
+        node: File,
+    ) {
+        if (NpmRuntime.nextMajor(dir)?.let { it >= 16 } != true) return
+        if (File(dir, "node_modules/@next/swc-wasm-nodejs/wasm.js").isFile) return
+        val version = NpmRuntime.installedVersion(dir, "next") ?: return
+        HostingRuntime.update(service.id) {
+            it.copy(message = "Installing Next.js WebAssembly compiler…")
+        }
+        log(service.id, "Installing @next/swc-wasm-nodejs@$version for android/arm64")
+        runTask(
+            context = context,
+            service = service,
+            layout = layout,
+            dir = dir,
+            program = node.absolutePath,
+            args = listOf(
+                npmCli.absolutePath,
+                "install",
+                "--no-save",
+                "--package-lock=false",
+                "--no-audit",
+                "--no-fund",
+                "--no-progress",
+                "@next/swc-wasm-nodejs@$version",
+            ),
+            npmCli = npmCli,
+            label = "npm install @next/swc-wasm-nodejs",
+            timeoutMinutes = 10,
+        )
+        NpmRuntime.seedNextWasm(dir)
+    }
+
     /** Run the optional build command inside the staged release. */
     private suspend fun runBuild(
         context: Context,
@@ -1043,6 +1172,7 @@ object HostingManager {
         } else {
             null
         }
+        NpmRuntime.seedNextWasm(dir)
         log(service.id, "Build: $command")
         runTask(
             context = context,

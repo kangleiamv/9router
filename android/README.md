@@ -70,10 +70,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.25>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.26>.
 
 ```bash
-adb install -r 9router-android-1.3.25-debug.apk
+adb install -r 9router-android-1.3.26-debug.apk
 ```
 
 The APK is about 98 MB because it carries the arm64 hosting runtimes. It builds
@@ -575,6 +575,19 @@ back to any of the last five.
    keep the same legacy execution policy as Termux. Native packages that must
    compile with `node-gyp` still need `clang`, `make` and Python, which are not
    bundled; prefer packages that ship Android/arm64 prebuilds.
+   Next.js 16 builds with Turbopack by default, which needs a native SWC
+   binding that does not exist for `android/arm64`. For a plain `next build`
+   script the app appends `--webpack` automatically; it also installs the
+   matching `@next/swc-wasm-nodejs` package when missing and seeds Next's
+   fallback folder, so the first build does not rely on Next's on-demand
+   download. A custom build command is respected as written, so include
+   `--webpack` yourself if it invokes `next build`.
+   If a release has no `node_modules` or no completed build (for example a
+   release recovered after an interrupted deploy), the first start installs
+   dependencies when **Install dependencies** is on, runs the build once and
+   records a `.build-<release>` marker beside the release. A failed build stops
+   the start and leaves its output in the site log instead of launching
+   `next start` without a `.next` directory.
 4. The document root is detected (`public/` for PHP, `index.js`/`server.js`/
    `package.json` `main` for Node.js, `app.py` for Python), the release is
    activated, and the service restarts if it was running (or immediately when

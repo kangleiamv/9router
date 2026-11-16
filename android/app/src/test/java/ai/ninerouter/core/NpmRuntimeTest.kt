@@ -55,6 +55,94 @@ class NpmRuntimeTest {
     }
 
     @Test
+    fun `next 16 builds use webpack for the android wasm fallback`() {
+        val dir = dir()
+        write(
+            dir,
+            "package.json",
+            """
+            {
+              "scripts": { "build": "next build" },
+              "dependencies": { "next": "^16.2.10" }
+            }
+            """.trimIndent(),
+        )
+        assertEquals("npm run build -- --webpack", NpmRuntime.buildCommand(dir))
+
+        write(dir, "node_modules/next/package.json", "{\"version\":\"16.2.10\"}")
+        assertEquals(16, NpmRuntime.nextMajor(dir))
+        assertEquals("16.2.10", NpmRuntime.installedVersion(dir, "next"))
+    }
+
+    @Test
+    fun `build commands keep custom flags and older next versions`() {
+        val dir = dir()
+        write(
+            dir,
+            "package.json",
+            """
+            {
+              "scripts": { "build": "next build --webpack" },
+              "dependencies": { "next": "16.2.10" }
+            }
+            """.trimIndent(),
+        )
+        assertEquals("npm run build", NpmRuntime.buildCommand(dir))
+
+        write(
+            dir,
+            "package.json",
+            """
+            {
+              "scripts": { "build": "next build && next-sitemap" },
+              "dependencies": { "next": "16.2.10" }
+            }
+            """.trimIndent(),
+        )
+        assertEquals("npm run build", NpmRuntime.buildCommand(dir))
+
+        write(
+            dir,
+            "package.json",
+            """
+            {
+              "scripts": { "build": "tsc" },
+              "dependencies": { "next": "16.2.10" }
+            }
+            """.trimIndent(),
+        )
+        assertEquals("npm run build", NpmRuntime.buildCommand(dir))
+
+        write(
+            dir,
+            "package.json",
+            """
+            {
+              "scripts": { "build": "next build" },
+              "dependencies": { "next": "^15.5.0" }
+            }
+            """.trimIndent(),
+        )
+        assertEquals("npm run build", NpmRuntime.buildCommand(dir))
+    }
+
+    @Test
+    fun `installed wasm swc is linked into next's fallback folder`() {
+        val dir = dir()
+        write(dir, "node_modules/@next/swc-wasm-nodejs/wasm.js", "wasm")
+        write(dir, "node_modules/next/package.json", "{\"version\":\"16.2.10\"}")
+
+        NpmRuntime.seedNextWasm(dir)
+
+        val seeded = File(dir, "node_modules/next/wasm/@next/swc-wasm-nodejs/wasm.js")
+        assertTrue(seeded.isFile)
+        assertEquals("wasm", seeded.readText())
+        // A second call is harmless.
+        NpmRuntime.seedNextWasm(dir)
+        assertTrue(seeded.isFile)
+    }
+
+    @Test
     fun `npm ci is used when a lockfile exists`() {
         val dir = dir()
         assertEquals("install", NpmRuntime.installArgs(dir).first())

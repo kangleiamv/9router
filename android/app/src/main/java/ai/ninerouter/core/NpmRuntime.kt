@@ -229,6 +229,80 @@ object NpmRuntime {
         }
     }
 
+    /** Version recorded in `node_modules/<name>/package.json`, if installed. */
+    fun installedVersion(dir: File, name: String): String? {
+        val file = File(dir, "node_modules/$name/package.json")
+        if (!file.isFile) return null
+        return runCatching {
+            Json.parseToJsonElement(file.readText())
+                .jsonObject["version"]?.jsonPrimitive?.contentOrNull
+        }.getOrNull()
+    }
+
+    private fun dependencySpec(dir: File, name: String): String? {
+        val file = File(dir, "package.json")
+        if (!file.isFile) return null
+        return runCatching {
+            val root = Json.parseToJsonElement(file.readText()).jsonObject
+            listOf("dependencies", "devDependencies", "optionalDependencies")
+                .firstNotNullOfOrNull { key ->
+                    (root[key] as? JsonObject)?.get(name)?.jsonPrimitive?.contentOrNull
+                }
+        }.getOrNull()
+    }
+
+    private fun major(text: String?): Int? =
+        Regex("(\\d+)").find(text.orEmpty())?.groupValues?.get(1)?.toIntOrNull()
+
+    /** Installed Next.js major, or the range declared in package.json. */
+    fun nextMajor(dir: File): Int? =
+        major(installedVersion(dir, "next") ?: dependencySpec(dir, "next"))
+
+    /**
+     * Next.js 16 builds with Turbopack by default. Turbopack needs the native
+     * SWC binding, and Next does not publish one for android/arm64; the wasm
+     * fallback only works with Webpack. Append `--webpack` for a plain Next
+     * build script, leaving custom commands and explicit flags untouched.
+     */
+    fun buildCommand(dir: File): String {
+        val fallback = "npm run build"
+        val build = manifest(dir)?.build?.trim().orEmpty()
+        if (build.isEmpty()) return fallback
+        if (build.any { it in ";&|" }) return fallback
+        val tokens = build.split(Regex("\\s+"))
+        if ("build" !in tokens || tokens.none { it.contains("next") }) return fallback
+        if (build.contains("--webpack") ||
+            build.contains("--turbopack") ||
+            build.contains("--turbo")
+        ) {
+            return fallback
+        }
+        val next = nextMajor(dir) ?: return fallback
+        if (next < 16) return fallback
+        return "$fallback -- --webpack"
+    }
+
+    /**
+     * Next 16 normally downloads its wasm SWC tarball during the build. The
+     * download/extract step is unreliable on Android, so if npm already
+     * installed the package, point Next's fallback folder at that copy.
+     */
+    fun seedNextWasm(dir: File) {
+        val source = File(dir, "node_modules/@next/swc-wasm-nodejs")
+        if (!File(source, "wasm.js").isFile) return
+        val next = File(dir, "node_modules/next")
+        if (!next.isDirectory) return
+        val target = File(next, "wasm/@next/swc-wasm-nodejs")
+        if (File(target, "wasm.js").isFile) return
+        target.parentFile?.mkdirs()
+        runCatching {
+            if (target.exists()) target.deleteRecursively()
+            Os.symlink(source.absolutePath, target.absolutePath)
+        }.onFailure {
+            runCatching { source.copyRecursively(target, overwrite = true) }
+        }
+    }
+
     /** `npm ci` when a lockfile pins the tree, otherwise `npm install`. */
     fun installArgs(dir: File): List<String> {
         val locked = File(dir, "package-lock.json").isFile ||

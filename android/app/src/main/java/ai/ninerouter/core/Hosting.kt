@@ -861,9 +861,10 @@ code{background:#f1f5f9;padding:.15rem .4rem;border-radius:.35rem}</style></head
      * and plain `http` both end up in `net.Server.listen`, so this also catches
      * apps that hardcode a port or call `listen(0)`.
      */
-    private const val NODE_PORT_AGENT = """// 9Router: report the port this Node server listens on, and make shell
-// scripts work on Android where only libnode.so is executable (no `node`).
+    private const val NODE_PORT_AGENT = """// 9Router: report the port this Node server listens on and make shell
+// scripts work on Android, where only libnode.so is executable by default.
 const net = require('net');
+const fs = require('fs');
 const path = require('path');
 const child = require('child_process');
 
@@ -881,47 +882,130 @@ net.Server.prototype.listen = function (...args) {
 };
 
 const nodeBin = process.execPath;
+const systemShell = '/system/bin/sh';
 const quote = (value) => "'" + String(value).replace(/'/g, "'\\''") + "'";
-const quotedNode = quote(nodeBin);
 const npmCli = process.env.NPM_CLI || '';
 const npxCli = npmCli ? path.join(path.dirname(npmCli), 'npx-cli.js') : '';
-const rewriteToken = (source, name, replacement) => {
-  if (!source.includes(name)) return source;
-  const pattern = new RegExp(
-    '(^|[&;|(`]\\s*)((?:[A-Za-z_][A-Za-z0-9_]*=[^\\s;&|]+\\s+)*)' +
-      name + '(?=\\s|${'$'})',
-    'g',
-  );
+
+const localBins = () => {
+  const dirs = [];
+  let dir = process.cwd();
+  for (let i = 0; i < 6; i++) {
+    dirs.push(path.join(dir, 'node_modules', '.bin'));
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  // Include every PATH entry, not only node_modules/.bin: globally installed
+  // packages live in the app-owned npm prefix and are common build tools.
+  for (const entry of (process.env.PATH || '').split(path.delimiter)) {
+    if (entry && !dirs.includes(entry)) dirs.push(entry);
+  }
+  return dirs;
+};
+
+const readHeader = (file) => {
+  const buffer = Buffer.alloc(256);
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    const read = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    return buffer.subarray(0, read);
+  } catch (err) {
+    return buffer.subarray(0, 0);
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+};
+
+// npm links package binaries as symlinks to JavaScript files whose shebang
+// is /usr/bin/env node. Android has no /usr/bin/env, and Android 10+ may
+// refuse to exec the file. Resolving the real script and starting it with
+// Node bypasses both problems.
+const resolveScript = (token) => {
+  if (!token || token.startsWith('-')) return null;
+  const explicit = token.includes('/');
+  const candidates = [];
+  if (explicit) {
+    candidates.push(path.isAbsolute(token) ? token : path.resolve(process.cwd(), token));
+  } else {
+    for (const dir of localBins()) candidates.push(path.join(dir, token));
+  }
+  for (const candidate of candidates) {
+    let real;
+    try {
+      real = fs.realpathSync(candidate);
+      if (!fs.statSync(real).isFile()) continue;
+    } catch (err) {
+      continue;
+    }
+    const header = readHeader(real);
+    if (
+      header.length >= 4 &&
+      header[0] === 0x7f && header[1] === 0x45 &&
+      header[2] === 0x4c && header[3] === 0x46
+    ) {
+      // Native ELF: the targetSdk 28 exec policy lets the shell run it.
+      return null;
+    }
+    const text = header.toString('utf8');
+    if (text.startsWith('#!')) {
+      const shebang = text.slice(2).split('\n')[0].trim();
+      if (/(?:^|[\s/])node(?:js)?(?:\s|${'$'})/.test(shebang)) {
+        return { file: nodeBin, args: [real] };
+      }
+      if (/(?:^|[\s/])(?:ba|da|k|z)?sh(?:\s|${'$'})/.test(shebang)) {
+        return { file: systemShell, args: [real] };
+      }
+      return null;
+    }
+    if (/\.(?:js|cjs|mjs)$/.test(real)) {
+      return { file: nodeBin, args: [real] };
+    }
+    return { file: systemShell, args: [real] };
+  }
+  return null;
+};
+
+const resolveCommand = (token) => {
+  if (token === 'node') return { file: nodeBin, args: [] };
+  if (token === 'npm' && npmCli) return { file: nodeBin, args: [npmCli] };
+  if (token === 'npx' && npxCli) return { file: nodeBin, args: [npxCli] };
+  return resolveScript(token);
+};
+
+const quoteCommand = (resolved) =>
+  quote(resolved.file) + resolved.args.map((arg) => ' ' + quote(arg)).join('');
+
+const rewriteCommands = (source) => {
+  if (typeof source !== 'string' || source.length === 0) return source;
   return source.replace(
-    pattern,
-    (match, prefix, assignments) => prefix + assignments + replacement,
+    /(^|[&;|(`\n]\s*)((?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|]+)\s+)*([^\s;&|()<>`]+)/g,
+    (match, prefix, assignments, token) => {
+      const resolved = resolveCommand(token);
+      return resolved ? prefix + (assignments || '') + quoteCommand(resolved) : match;
+    },
   );
 };
-const rewrite = (source) => {
-  if (typeof source !== 'string') return source;
-  let out = rewriteToken(source, 'node', quotedNode);
-  if (npmCli) out = rewriteToken(out, 'npm', quotedNode + ' ' + quote(npmCli));
-  if (npxCli) out = rewriteToken(out, 'npx', quotedNode + ' ' + quote(npxCli));
-  return out;
-};
+
 const fixSpawn = (command, args, options) => {
   if (typeof command !== 'string') return [command, args, options];
-  if (command === 'node') {
-    command = nodeBin;
-  } else if (command === 'npm' && npmCli) {
-    args = [npmCli].concat(Array.isArray(args) ? args : []);
-    command = nodeBin;
-  } else if (command === 'npx' && npxCli) {
-    args = [npxCli].concat(Array.isArray(args) ? args : []);
-    command = nodeBin;
-  } else if (options && options.shell) {
-    command = rewrite(command);
-  } else if (Array.isArray(args)) {
+  if (options && options.shell) {
+    return [rewriteCommands(command), args, options];
+  }
+  if (Array.isArray(args)) {
     const index = args.indexOf('-c');
-    if (index >= 0 && typeof args[index + 1] === 'string') {
+    const shell = command === 'sh' || path.basename(command).endsWith('sh');
+    if (index >= 0 && shell && typeof args[index + 1] === 'string') {
       args = args.slice();
-      args[index + 1] = rewrite(args[index + 1]);
+      args[index + 1] = rewriteCommands(args[index + 1]);
+      return [command, args, options];
     }
+  }
+  const resolved = resolveCommand(command);
+  if (resolved) {
+    args = resolved.args.concat(Array.isArray(args) ? args : []);
+    command = resolved.file;
   }
   return [command, args, options];
 };
@@ -936,7 +1020,40 @@ child.spawnSync = function (command, args, options) {
   const fixed = fixSpawn(command, args, options);
   return spawnSync.call(this, fixed[0], fixed[1], fixed[2]);
 };
+const exec = child.exec;
+child.exec = function (command, options, callback) {
+  if (typeof options === 'function') {
+    callback = options;
+    options = undefined;
+  }
+  return exec.call(this, rewriteCommands(String(command)), options, callback);
+};
+const execSync = child.execSync;
+child.execSync = function (command, options) {
+  return execSync.call(this, rewriteCommands(String(command)), options);
+};
 """
+
+    /** Runs a custom build command after the preload has fixed the shell. */
+    internal const val NODE_SHELL_RUNNER = """// 9Router: run a build command with the preload's Android-safe rewriting.
+const { spawn } = require('child_process');
+const command = process.argv[2] || '';
+const child = spawn('/system/bin/sh', ['-c', command], {
+  stdio: 'inherit',
+  env: process.env,
+});
+child.on('error', (err) => {
+  console.error(String((err && err.message) || err));
+  process.exit(127);
+});
+child.on('exit', (code, signal) => process.exit(code === null ? 1 : code));
+"""
+
+    /** Script written into the service home and preloaded into Node. */
+    fun nodeAgentScript(): String = NODE_PORT_AGENT
+
+    /** Script used to run a custom build command through the preload. */
+    fun shellRunnerScript(): String = NODE_SHELL_RUNNER
 
     /** Starter page for a new static site; safe to replace. */
     private const val STATIC_INDEX = """<!doctype html>

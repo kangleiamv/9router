@@ -39,8 +39,9 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 
 ## Build
 
-The project targets JDK 17, AGP 8.10.1, Gradle 8.14.3, Kotlin 2.1.21, compileSdk 36
-and minSdk 26.
+The project targets JDK 17, AGP 8.10.1, Gradle 8.14.3, Kotlin 2.1.21, compileSdk 36,
+minSdk 26 and, deliberately, targetSdk 28 for side-loaded builds. See
+[Execution policy](#execution-policy).
 
 ### Locally
 
@@ -69,10 +70,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.21>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.22>.
 
 ```bash
-adb install -r 9router-android-1.3.21-debug.apk
+adb install -r 9router-android-1.3.22-debug.apk
 ```
 
 The APK is about 98 MB because it carries the arm64 hosting runtimes. It builds
@@ -80,6 +81,19 @@ and runs on any ABI, but the bundled runtimes are `arm64-v8a` only.
 
 Or download the artifact and open it on the device (allow install from unknown
 sources for the file manager you use).
+
+### Execution policy
+
+Termux can run `node_modules/.bin` scripts and native binaries from its own
+app storage because it targets API 28. Android 10's W^X rule only applies to
+apps targeting API 29 or newer: for those apps, a file in writable app storage
+cannot be `execve`'d. 9Router also targets 28, so its PATH shims, extracted
+runtimes and npm global prefix keep the legacy policy.
+
+This is why the app can do what Termux does on Android 10, 11, 12, 13, 14 and
+later. It is a side-load build: Google Play requires a much newer target and
+would re-enable the restriction. Raising `targetSdk` would break npm lifecycle
+scripts and prebuilt binaries under `files/`.
 
 ## Use
 
@@ -419,16 +433,26 @@ folder used before the first deploy, `data` for database files, and `home`,
   npm and Node use a bundled Mozilla CA bundle through `NODE_EXTRA_CA_CERTS` and
   `SSL_CERT_FILE`, because Android has none of Node's compiled-in OpenSSL trust
   paths. npm's download cache is shared in `files/npm/cache`.
-  The app preloads a small agent (`node --require`) that hooks
+  The app preloads an agent (`node --require`) that hooks
   `net.Server.listen`, so the port your app actually binds is detected even when
   it ignores `PORT` or calls `listen(0)`. `NODE_OPTIONS` reaches npm and every
-  child Node process it starts. The agent also rewrites `node` commands spawned
-  by npm to the bundled `libnode.so`, so `npm start` and lifecycle scripts work
-  without a `node` binary on `PATH`. Detection covers plain `http`, Express and
+  child Node process it starts. Detection covers plain `http`, Express and
   anything else built on `net`, and also parses framework output such as Vite's
   `Local: http://localhost:5173`, Next.js `started server on ...:3000` and
   `listening on port 8080`. The row, readiness probe and Publish button all use
   the detected port while the saved port stays the `PORT` value.
+  The same agent solves Android's missing `node` and `/usr/bin/env`:
+  `files/npm/shim` contains a `node` link to `libnode.so` plus `npm`/`npx`
+  `/system/bin/sh` wrappers, and the agent resolves command-position `node`,
+  `npm`, `npx`, `node_modules/.bin` entries and PATH scripts to the bundled
+  binary/CLI or `/system/bin/sh`. A package bin with a
+  `#!/usr/bin/env node` shebang therefore runs even though Android has no
+  `/usr/bin/env`.
+  `npm install -g` uses a writable prefix at `files/npm/global`; its `bin` is
+  on `PATH` and `lib/node_modules` is on `NODE_PATH`. You can run a global
+  install as a custom build command. `node-on-android` installs this way, but
+  it is an APK-packaging CLI that needs `apktool`, `zipalign` and `apksigner`,
+  not a Node runtime; its WebView host is not used here.
 - **Python** — `python3 -m http.server <port> --bind 127.0.0.1 --directory
   <public>`, or your own entrypoint such as `app.py`.
 - **Redis** — AOF persistence in `data`, loopback bind and a generated
@@ -535,12 +559,14 @@ back to any of the last five.
    `npm install`. If no custom build command is set and `package.json` has a
    `build` script, **Run npm build** (also on by default) runs
    `npm run build`. A custom **build command** still wins and runs via
-   `/system/bin/sh -c`; command-position `node`, `npm` and `npx` tokens are
-   rewritten to the bundled binary and CLI so Android's script-execution
-   restriction is avoided.
-   Android 10+ still blocks executing scripts from app-writable storage, so
-   lifecycle scripts that call `node` work, while a build that invokes a
-   `node_modules/.bin` shim such as `next` or `vite` directly may not.
+   a Node preload, so command-position `node`, `npm` and `npx` tokens and
+   `node_modules/.bin` entries such as `next` or `vite` are resolved to the
+   bundled binary/CLI or `/system/bin/sh` before the shell execs them. This
+   also covers `#!/usr/bin/env node`, which is absent on Android.
+   Because the app targets 28, scripts and prebuilt ELF binaries in app storage
+   keep the same legacy execution policy as Termux. Native packages that must
+   compile with `node-gyp` still need `clang`, `make` and Python, which are not
+   bundled; prefer packages that ship Android/arm64 prebuilds.
 4. The document root is detected (`public/` for PHP, `index.js`/`server.js`/
    `package.json` `main` for Node.js, `app.py` for Python), the release is
    activated, and the service restarts if it was running (or immediately when
@@ -560,8 +586,8 @@ command, and for Node.js shows the bundled npm version with **Install
 dependencies** and **Run npm build** switches. Values are applied on top of the
 runtime defaults and survive restarts; `PORT`, `HOST`, `DOCROOT`, `PATH`,
 `LD_LIBRARY_PATH`, `HOME`, `TMPDIR`, `NODE_ENV`, `PGDATA`, `LANG`, `TZ`, `PWD`,
-`NPM_CLI`, `NODE_BIN` and `ANDROID_*` stay owned
-by the runtime. At most 32 variables are allowed.
+`NPM_CLI`, `NODE_BIN`, `NODE_PATH`, `NODE_EXTRA_CA_CERTS` and `ANDROID_*`
+stay owned by the runtime. At most 32 variables are allowed.
 
 The **Files** button and the **storage** row follow the active release, so
 editing a file changes exactly what is being served. Deploying an archive or
@@ -596,7 +622,9 @@ itself is not blocked by Android's ban on executing files from app storage.
 
 The native runtimes are Android/bionic `aarch64` builds from the Termux packages,
 repackaged as `jniLibs` and extracted by the installer to the app's
-`nativeLibraryDir`, the only location Android 10+ lets an app execute. Library
+`nativeLibraryDir`. That directory is executable regardless of target SDK,
+and the targetSdk 28 policy also keeps scripts and binaries under `files/`
+executable. Library
 files that carry a version suffix upstream (`libssl.so.3`, `libz.so.1`,
 `libicu*.so.79`, …) are renamed with a `9r` infix (`libssl9r.so`, `libz9r.so`)
 because the APK packager only accepts names ending in `.so`; `DT_NEEDED` and
@@ -624,8 +652,8 @@ Python and Redis are not bundled. 9Router looks for `python3` and
 
 1. the APK native library directory (`libphp.so`, `libnode.so`, …);
 2. directories on `PATH`;
-3. `files/hosting/bin` and `files/bin` (works on Android 9 and older; Android
-   10+ blocks executing binaries copied into app storage).
+3. `files/hosting/bin` and `files/bin` (executable here because the app
+   targets 28, like Termux).
 
 Termux keeps its binaries in the Termux app sandbox, so 9Router cannot execute
 them. Run the service in Termux as usual and publish it with a local link:
@@ -656,6 +684,12 @@ that the bundled runtime is missing, and only PATH runtimes can start.
 - Cloudflare quick tunnels carry HTTP only. TCP services and native FTP need a
   Named tunnel, a Zero Trust hostname and a client policy.
 - PHP, Node.js, MariaDB and PostgreSQL are bundled for `arm64-v8a` only. Python
-  and Redis need a binary that Android lets the app execute: copying one into
-  app storage is not enough on Android 10+, so keep running them in Termux and
-  publish the port instead.
+  and Redis are not bundled. A compatible arm64 binary placed in
+  `files/hosting/bin` can execute under the targetSdk 28 policy, but the app
+  does not download or compile one; keep running them in Termux and publish
+  the port instead if you do not have a binary.
+- `node-on-android` is a 2017 desktop packaging CLI, not an on-device runtime.
+  It stuffs a Node app into a base APK with `apktool` and the Android build
+  tools, and its generated app hosts the UI in a WebView. 9Router already runs
+  Node from `libnode.so` in `nativeLibraryDir`; installing the CLI globally
+  works, but building an APK from the phone still needs those external tools.

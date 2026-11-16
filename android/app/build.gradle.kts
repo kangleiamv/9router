@@ -13,9 +13,13 @@ android {
     defaultConfig {
         applicationId = "ai.ninerouter"
         minSdk = 26
-        targetSdk = 34
-        versionCode = 26
-        versionName = "1.3.21"
+        // Sideloaded app: targetSdk 28 keeps Android's pre-10 execution policy
+        // for app storage, exactly like Termux. Raising this re-enables W^X and
+        // blocks node_modules/.bin shims and prebuilt native binaries. The
+        // Android 10+ install floor is lower than 28, so it still installs.
+        targetSdk = 28
+        versionCode = 27
+        versionName = "1.3.22"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }

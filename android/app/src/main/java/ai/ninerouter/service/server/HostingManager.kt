@@ -1,5 +1,6 @@
 package ai.ninerouter.service.server
 
+import ai.ninerouter.core.ExecPolicy
 import ai.ninerouter.core.HostBootstrap
 import ai.ninerouter.core.HostDeploy
 import ai.ninerouter.core.HostLayout
@@ -92,6 +93,8 @@ object HostingManager {
             ?.split(File.pathSeparator)
             ?.filter { it.isNotBlank() }
             ?.forEach { add(File(it)) }
+        add(NpmRuntime.shimDir(context))
+        add(NpmRuntime.globalBin(context))
         add(File(context.filesDir, "bin"))
         add(File(context.filesDir, "hosting/bin"))
         add(File("/system/bin"))
@@ -106,21 +109,22 @@ object HostingManager {
     }.getOrDefault(false)
 
     /**
-     * Android 10+ blocks execve for files in app-writable storage, so a binary
-     * copied into `files/bin` cannot run there even though it is +x.
+     * Android 10+ blocks execve for files in app-writable storage when the
+     * app targets 29+. This build targets 28 (like Termux), so its own shims
+     * and extracted binaries keep the legacy execution policy.
      */
-    private fun execBlocked(context: Context, program: File): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
-        val path = program.absolutePath
-        val writable = listOfNotNull(
+    private fun execBlocked(context: Context, program: File): Boolean = ExecPolicy.blocked(
+        deviceSdk = Build.VERSION.SDK_INT,
+        targetSdk = context.applicationInfo.targetSdkVersion,
+        path = program.absolutePath,
+        writableDirs = listOfNotNull(
             context.filesDir,
             context.cacheDir,
             context.codeCacheDir,
             context.noBackupFilesDir,
             context.getExternalFilesDir(null),
-        )
-        return writable.any { dir -> path == dir.absolutePath || path.startsWith(dir.absolutePath + "/") }
-    }
+        ),
+    )
 
     private fun candidates(name: String): List<String> =
         if (name.startsWith("lib") && name.endsWith(".so")) listOf(name)
@@ -362,6 +366,7 @@ object HostingManager {
                 } else {
                     null
                 }
+                NpmRuntime.installShims(app, bins["node"], npmCli)
                 val plan = HostingPlanner.plan(
                     service = effective,
                     layout = layout,
@@ -791,6 +796,7 @@ object HostingManager {
                 null
             }
             val node = if (spec.id == "node") resolve(app, HostedKinds.node)["node"] else null
+            NpmRuntime.installShims(app, node, npmCli)
             if (
                 npmCli != null &&
                 service.npmInstall &&
@@ -912,15 +918,29 @@ object HostingManager {
         command: String = service.build,
     ) {
         val node = resolve(context.applicationContext, HostedKinds.node)["node"]
-        val resolved = NpmRuntime.rewriteShell(command, node, npmCli)
+        // Run the command through a Node preload so command-position
+        // node/npm/npx and node_modules/.bin shims are rewritten before the
+        // shell tries to exec a file with a /usr/bin/env shebang.
+        val runner = if (node != null) {
+            File(layout.home, "9router-shell.js").apply {
+                parentFile?.mkdirs()
+                writeText(HostingPlanner.shellRunnerScript())
+            }
+        } else {
+            null
+        }
         log(service.id, "Build: $command")
         runTask(
             context = context,
             service = service,
             layout = layout,
             dir = dir,
-            program = "/system/bin/sh",
-            args = listOf("-c", resolved),
+            program = runner?.let { node!!.absolutePath } ?: "/system/bin/sh",
+            args = if (runner != null) {
+                listOf(runner.absolutePath, command)
+            } else {
+                listOf("-c", NpmRuntime.rewriteShell(command, node, npmCli))
+            },
             npmCli = npmCli,
             label = "Build",
             timeoutMinutes = 10,
@@ -968,9 +988,12 @@ object HostingManager {
         val builder = ProcessBuilder(listOf(program) + args)
             .directory(dir)
             .redirectErrorStream(true)
-        builder.environment().putAll(
-            buildEnv(context, layout, service, npmCli),
-        )
+        val env = buildEnv(context, layout, service, npmCli).toMutableMap()
+        val localBins = File(dir, "node_modules/.bin")
+        if (localBins.isDirectory) {
+            env["PATH"] = localBins.absolutePath + ":" + env["PATH"].orEmpty()
+        }
+        builder.environment().putAll(env)
         val process = try {
             builder.start()
         } catch (t: Throwable) {
@@ -1003,16 +1026,32 @@ object HostingManager {
         npmCli: File?,
     ): Map<String, String> {
         val dirs = searchDirs(context)
+        // Include the global prefix even before the first install: searchDirs
+        // only keeps existing folders, and npm creates files/npm/global during
+        // a global install. Later commands and restarts resolve its bins.
+        val globalBin = NpmRuntime.globalBin(context).apply { mkdirs() }
+        val path = (listOf(globalBin.absolutePath) + dirs.map { it.absolutePath } +
+            "/system/bin:/vendor/bin")
+            .distinct()
+            .joinToString(":")
         val env = linkedMapOf(
             "HOME" to layout.home.absolutePath,
             "TMPDIR" to layout.temp.absolutePath,
-            "PATH" to (dirs.map { it.absolutePath } + "/system/bin:/vendor/bin").joinToString(":"),
+            "PATH" to path,
             "LANG" to "C.UTF-8",
         )
         if (dirs.isNotEmpty()) {
             env["LD_LIBRARY_PATH"] = dirs.joinToString(":") { it.absolutePath }
         }
         env.putAll(service.env)
+        // Every build/install child gets the same preload as a hosted Node
+        // process. It fixes shebang scripts and missing node/npm commands.
+        val agent = File(layout.home, "9router-port.js")
+        layout.home.mkdirs()
+        agent.writeText(HostingPlanner.nodeAgentScript())
+        val options = env["NODE_OPTIONS"].orEmpty().trim()
+        env["NODE_OPTIONS"] = (if (options.isEmpty()) "" else "$options ") +
+            "--require ${agent.absolutePath}"
         NpmRuntime.applyEnvironment(env, npmCli, resolve(context, HostedKinds.node)["node"])
         return env
     }

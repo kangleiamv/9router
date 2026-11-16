@@ -106,8 +106,8 @@ quota tracking and the Telegram bot. Every screen is Compose — there is no
 WebView and no demo build.
 
 Download the debug APK from
-[Releases](https://github.com/kangleiamv/9router/releases/tag/android-v1.3.21),
-then `adb install -r 9router-android-1.3.21-debug.apk` (or open the file on the
+[Releases](https://github.com/kangleiamv/9router/releases/tag/android-v1.3.22),
+then `adb install -r 9router-android-1.3.22-debug.apk` (or open the file on the
 device). Build instructions are in [`android/README.md`](./android/README.md).
 The Providers screen mirrors the web registry with bundled logos, and the
 **Models** button discovers each provider's live catalog and caches it for
@@ -123,7 +123,11 @@ hostnames (each one creates a named local link), on-device MariaDB schemas with
 ready-made `DB_*`/`DATABASE_URL` injection, self-signed TLS pairs generated with
 the bundled OpenSSL, multi-account FTP logins per site, and storage per runtime.
 Node.js apps report the port they really listen on, including npm, Vite,
-Next.js and Express log lines, so apps that ignore `PORT` still work. The app ships complete dark and light palettes with a System/Light/
+Next.js and Express log lines, so apps that ignore `PORT` still work. Like
+Termux, the app targets SDK 28 so scripts in app storage stay executable on
+Android 10+; `node`/`npm`/`npx` shims and a Node preload resolve
+`node_modules/.bin` shebangs that assume `/usr/bin/env`, and `npm install -g`
+uses a writable app-owned prefix. The app ships complete dark and light palettes with a System/Light/
 Dark picker in Settings and a quick toggle in the drawer. Antigravity, Gemini CLI and Claude Code can be
 connected with a real OAuth sign-in from the Providers screen, and any
 OpenAI/Anthropic-compatible endpoint can be added as a custom provider with its

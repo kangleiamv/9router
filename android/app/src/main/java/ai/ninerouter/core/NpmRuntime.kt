@@ -1,6 +1,7 @@
 package ai.ninerouter.core
 
 import android.content.Context
+import android.system.Os
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -52,6 +53,23 @@ object NpmRuntime {
 
     /** Shared download cache, so redeploys do not fetch the same tarballs twice. */
     fun cacheDir(context: Context): File = File(context.filesDir, "npm/cache")
+
+    /**
+     * Prefix for `npm install -g`. Node's compiled-in prefix points inside the
+     * read-only native library directory, so global installs would fail with
+     * EACCES. A stable app-owned prefix also survives npm upgrades.
+     */
+    fun globalRoot(context: Context): File = File(context.filesDir, "npm/global")
+
+    fun globalBin(context: Context): File = File(globalRoot(context), "bin")
+
+    fun globalModules(context: Context): File = File(globalRoot(context), "lib/node_modules")
+
+    fun globalRoot(npmCli: File): File {
+        val npmDir = npmCli.parentFile?.parentFile?.parentFile
+            ?: return File(npmCli.parentFile, "global")
+        return File(npmDir, "global")
+    }
 
     fun caFile(npmCli: File): File = File(npmCli.parentFile?.parentFile, "cacert.pem")
 
@@ -134,6 +152,52 @@ object NpmRuntime {
         }
         return File(target, NPM_CLI)
     }
+
+    /** PATH directory holding the node/npm/npx shims. */
+    fun shimDir(context: Context): File = File(context.filesDir, "npm/shim")
+
+    /**
+     * Put `node`, `npm` and `npx` on PATH. npm lifecycle scripts, package
+     * scripts and prebuilt tools frequently spawn these names directly, and
+     * Android has no Node binaries. This build targets SDK 28, so the shims
+     * are executable under the same legacy policy Termux uses.
+     */
+    fun installShims(context: Context, node: File?, npmCli: File?) {
+        if (node == null) return
+        val dir = shimDir(context.applicationContext).apply { mkdirs() }
+        linkNode(dir, node)
+        if (npmCli != null) {
+            writeShim(File(dir, "npm"), shimText(node, npmCli))
+            val npxCli = File(npmCli.parentFile?.parentFile, NPX_CLI)
+            if (npxCli.isFile) writeShim(File(dir, "npx"), shimText(node, npxCli))
+        }
+    }
+
+    private fun linkNode(dir: File, node: File) {
+        val link = File(dir, "node")
+        val target = runCatching { node.canonicalFile }.getOrNull() ?: node.absoluteFile
+        if (runCatching { link.canonicalFile }.getOrNull() == target) return
+        link.delete()
+        val linked = runCatching {
+            Os.symlink(node.absolutePath, link.absolutePath)
+        }.isSuccess
+        if (!linked) {
+            writeShim(
+                link,
+                "#!/system/bin/sh\nexec " + shellQuote(node.absolutePath) + " \"${'$'}@\"\n",
+            )
+        }
+    }
+
+    private fun writeShim(file: File, text: String) {
+        file.delete()
+        file.writeText(text)
+        file.setExecutable(true, true)
+    }
+
+    internal fun shimText(node: File, cli: File): String =
+        "#!/system/bin/sh\nexec " + shellQuote(node.absolutePath) + " " +
+            shellQuote(cli.absolutePath) + " \"${'$'}@\"\n"
 
     /** Parse the package.json in [dir], or null when it is absent or invalid. */
     fun manifest(dir: File): Manifest? {
@@ -250,6 +314,21 @@ object NpmRuntime {
         if (cache != null) {
             cache.mkdirs()
             env["npm_config_cache"] = cache.absolutePath
+        }
+        // `npm install -g` needs a writable prefix, and globally installed
+        // packages must be resolvable and callable from project scripts.
+        val prefix = npmCli?.let { globalRoot(it) }
+        if (prefix != null) {
+            prefix.mkdirs()
+            File(prefix, "bin").mkdirs()
+            env["npm_config_prefix"] = prefix.absolutePath
+            val modules = File(prefix, "lib/node_modules")
+            val nodePath = env["NODE_PATH"].orEmpty().trim()
+            env["NODE_PATH"] = if (nodePath.isEmpty()) {
+                modules.absolutePath
+            } else {
+                modules.absolutePath + File.pathSeparator + nodePath
+            }
         }
         env["NO_UPDATE_NOTIFIER"] = "1"
         env["npm_config_update_notifier"] = "false"

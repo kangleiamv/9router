@@ -150,6 +150,37 @@ class NpmRuntimeTest {
     }
 
     @Test
+    fun `npm shims exec the bundled node and CLI`() {
+        val node = File("/data/app/ai.ninerouter/lib/arm64/libnode.so")
+        val cli = File("/data/user/0/ai.ninerouter/files/npm/11.19.1/bin/npm-cli.js")
+        assertEquals(
+            "#!/system/bin/sh\nexec '" + node.absolutePath + "' '" + cli.absolutePath + "' \"${'$'}@\"\n",
+            NpmRuntime.shimText(node, cli),
+        )
+        val odd = File("/tmp/it's a node")
+        assertTrue(
+            NpmRuntime.shimText(odd, cli)
+                .startsWith("#!/system/bin/sh\nexec '/tmp/it'\\''s a node' "),
+        )
+    }
+
+    @Test
+    fun `node preload resolves bin shims instead of execing them`() {
+        val agent = HostingPlanner.nodeAgentScript()
+        assertTrue(agent.contains("node_modules"))
+        assertTrue(agent.contains(".bin"))
+        assertTrue(agent.contains("fs.realpathSync"))
+        assertTrue(agent.contains("readHeader"))
+        assertTrue(agent.contains("child.spawn = function"))
+        assertTrue(agent.contains("child.execSync = function"))
+        assertTrue(agent.contains("/system/bin/sh"))
+        // Global prefixes are on PATH too, not only node_modules/.bin.
+        assertTrue(agent.contains("if (entry && !dirs.includes(entry)) dirs.push(entry)"))
+        val runner = HostingPlanner.shellRunnerScript()
+        assertTrue(runner.contains("spawn('/system/bin/sh', ['-c', command]"))
+    }
+
+    @Test
     fun `network environment points npm at the bundled roots and cache`() {
         val root = dir()
         val npm = File(root, "11.19.1/bin/npm-cli.js").apply { parentFile!!.mkdirs() }
@@ -162,5 +193,22 @@ class NpmRuntimeTest {
         assertEquals(node.absolutePath, env["NODE_BIN"])
         assertEquals("false", env["npm_config_update_notifier"])
         assertTrue(env["npm_config_cache"]!!.endsWith("/cache"))
+    }
+
+    @Test
+    fun `global installs use an app-owned prefix and resolvable modules`() {
+        val root = dir()
+        val npm = File(root, "11.19.1/bin/npm-cli.js").apply { parentFile!!.mkdirs() }
+        write(npm.parentFile!!.parentFile!!, "cacert.pem", "roots")
+        val env = linkedMapOf("NODE_PATH" to "/existing/modules")
+        NpmRuntime.applyEnvironment(env, npm, File(root, "node"))
+        val global = File(root, "global")
+        assertEquals(global.absolutePath, env["npm_config_prefix"])
+        assertTrue(File(global, "bin").isDirectory)
+        assertEquals(
+            File(global, "lib/node_modules").absolutePath + File.pathSeparator +
+                "/existing/modules",
+            env["NODE_PATH"],
+        )
     }
 }

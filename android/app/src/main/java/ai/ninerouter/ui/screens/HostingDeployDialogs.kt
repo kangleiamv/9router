@@ -175,7 +175,8 @@ internal fun HostEnvDialog(
                     label = "Build command (optional)",
                     placeholder = "npm install && npm run build",
                     supportingText = "Runs inside the new release before it is activated. " +
-                        "npm and npx are rewritten to the bundled CLI.",
+                        "node, npm, npx and node_modules/.bin use the bundled runtimes. " +
+                        "npm install -g writes to files/npm/global.",
                 )
                 if (service.kind == "node") {
                     Spacer(Modifier.height(10.dp))
@@ -187,7 +188,8 @@ internal fun HostEnvDialog(
                     Spacer(Modifier.height(2.dp))
                     Text(
                         "Deploy installs package.json dependencies and can run the build script. " +
-                            "The runtime port is detected from npm and child Node processes.",
+                            "The runtime port is detected from npm and child Node processes. " +
+                            "Global installs use files/npm/global, with its bin folder on PATH.",
                         style = MaterialTheme.typography.labelSmall,
                         color = TextMuted,
                     )

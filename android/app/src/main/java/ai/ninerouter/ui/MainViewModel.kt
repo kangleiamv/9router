@@ -14,6 +14,7 @@ import ai.ninerouter.core.HostingRuntime
 import ai.ninerouter.core.HostingStore
 import ai.ninerouter.core.LinkTunnelRuntime
 import ai.ninerouter.core.LocalServices
+import ai.ninerouter.core.SiteDatabases
 import ai.ninerouter.core.ProxyRuntime
 import ai.ninerouter.core.ProviderUsage
 import ai.ninerouter.core.TunnelLink
@@ -37,6 +38,7 @@ import ai.ninerouter.engine.oauth.OAuthProviders
 import ai.ninerouter.engine.specificData
 import ai.ninerouter.service.ProxyForegroundService
 import ai.ninerouter.service.server.HostingManager
+import ai.ninerouter.service.server.SiteTools
 import ai.ninerouter.util.Crypto
 import android.app.Application
 import android.content.Intent
@@ -104,6 +106,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _hostingAvailability = MutableStateFlow<Map<String, Boolean>>(emptyMap())
     val hostingAvailability: StateFlow<Map<String, Boolean>> = _hostingAvailability.asStateFlow()
+
+    /** MySQL schemas, loaded on demand by the Databases tab. */
+    private val _databases = MutableStateFlow<List<SiteDatabases.DbInfo>>(emptyList())
+    val databases: StateFlow<List<SiteDatabases.DbInfo>> = _databases.asStateFlow()
+
+    private val _databaseBusy = MutableStateFlow(false)
+    val databaseBusy: StateFlow<Boolean> = _databaseBusy.asStateFlow()
+
+    private val _databaseVersion = MutableStateFlow<String?>(null)
+    val databaseVersion: StateFlow<String?> = _databaseVersion.asStateFlow()
 
     val running: StateFlow<Boolean> = ProxyRuntime.running
     val port: StateFlow<Int> = ProxyRuntime.port
@@ -517,6 +529,247 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 ProxyForegroundService.syncHosting(context)
                 emit("${service.name}: environment saved")
             }.onFailure { emit(it.message ?: "Could not save the environment", true) }
+        }
+    }
+
+    /**
+     * Create a site with sensible defaults: the next free loopback port, a
+     * starter page and, unless the caller opts out, an immediate start.
+     */
+    fun createHostedSite(
+        kind: String,
+        name: String,
+        domain: String = "",
+        entry: String = "",
+        autoStart: Boolean = true,
+    ) {
+        val context = getApplication<Application>()
+        viewModelScope.launch {
+            runCatching {
+                val spec = HostedKinds.require(kind)
+                val current = HostingStore.decode(repo.getSetting(HostingStore.SETTINGS_KEY))
+                if (current.size >= HostingStore.MAX_SERVICES) {
+                    error("At most ${HostingStore.MAX_SERVICES} hosted services are supported.")
+                }
+                val blocked = blockedHostingPorts()
+                val id = HostingStore.newId(kind, current)
+                val port = HostingStore.nextPort(spec.port, current.map { it.port }, blocked)
+                val created = normalizeHosted(
+                    HostedService(
+                        id = id,
+                        kind = kind,
+                        name = name.ifBlank { spec.label },
+                        port = port,
+                        entry = entry,
+                        domain = domain,
+                        autoStart = autoStart,
+                    ),
+                )
+                val safe = HostingStore.require(current + created, blocked)
+                repo.putSetting(HostingStore.SETTINGS_KEY, HostingStore.encode(safe))
+                refreshSettings()
+                ProxyForegroundService.syncHosting(context)
+                if (autoStart) {
+                    ProxyForegroundService.start(context)
+                    HostingManager.start(context, safe.first { it.id == id })
+                }
+                emit("${created.name} created on 127.0.0.1:$port")
+            }.onFailure { emit(it.message ?: "Could not create the site", true) }
+        }
+    }
+
+    /**
+     * Assign a hostname to a site. A named local link is created at the same
+     * time, so `name.localhost:<publicPort>` and the tunnel hostname route to
+     * the site with no extra step.
+     */
+    fun setHostedDomain(id: String, rawDomain: String) {
+        val context = getApplication<Application>()
+        viewModelScope.launch {
+            runCatching {
+                val current = HostingStore.decode(repo.getSetting(HostingStore.SETTINGS_KEY))
+                val service = current.firstOrNull { it.id == id }
+                    ?: error("That hosted service no longer exists")
+                val domain = rawDomain.trim().lowercase()
+                val updated = service.copy(domain = domain)
+                val next = current.map { if (it.id == id) updated else it }
+                repo.putSetting(
+                    HostingStore.SETTINGS_KEY,
+                    HostingStore.encode(HostingStore.require(next, blockedHostingPorts())),
+                )
+                syncDomainLink(context, service, domain)
+                refreshSettings()
+                emit(
+                    if (domain.isEmpty()) {
+                        "Hostname removed from ${service.name}"
+                    } else {
+                        "$domain now routes to ${service.name}"
+                    },
+                )
+            }.onFailure { emit(it.message ?: "Could not assign that hostname", true) }
+        }
+    }
+
+    private suspend fun syncDomainLink(
+        context: Application,
+        service: HostedService,
+        domain: String,
+    ) {
+        val gateway = ProxyRuntime.port.value
+        val blocked = setOf(gateway, TunnelPorts.publicPort(gateway))
+        val current = TunnelLinks.decode(repo.getSetting(TunnelLinks.SETTINGS_KEY))
+        val target = service.target
+        val previous = service.domain.trim().lowercase()
+        val withoutSite = current.filterNot { link ->
+            link.target == target &&
+                (link.host.equals(previous, true) || link.host.equals(domain, true))
+        }
+        val next = if (domain.isBlank()) {
+            withoutSite
+        } else {
+            val link = TunnelLinks.fromDraft(
+                TunnelLinkDraft(
+                    name = service.name,
+                    host = domain,
+                    target = target,
+                    mode = TunnelLinks.MODE_NAMED,
+                    kind = TunnelLinks.KIND_HTTP,
+                ),
+                blockedPorts = blocked,
+            )
+            withoutSite + link
+        }
+        repo.putSetting(TunnelLinks.SETTINGS_KEY, TunnelLinks.encode(next))
+        ProxyForegroundService.syncLinks(context)
+    }
+
+    /** Generate a self-signed certificate for a site and reload its runtime. */
+    fun generateSiteCertificate(id: String) {
+        val context = getApplication<Application>()
+        viewModelScope.launch {
+            runCatching {
+                val service = HostingStore
+                    .decode(repo.getSetting(HostingStore.SETTINGS_KEY))
+                    .firstOrNull { it.id == id } ?: error("That hosted service no longer exists")
+                val layout = HostingManager.layout(context, service)
+                val certificate = SiteTools.certificate(context, service, layout)
+                if (HostingRuntime.state(id).running) {
+                    HostingManager.restart(context, service)
+                }
+                emit(
+                    "Certificate for ${certificate.subject.substringAfter("CN=")} " +
+                        "is valid for ${certificate.daysLeft} days",
+                )
+            }.onFailure { emit(it.message ?: "Could not generate the certificate", true) }
+        }
+    }
+
+    fun deleteSiteCertificate(id: String) {
+        val context = getApplication<Application>()
+        viewModelScope.launch {
+            runCatching {
+                val service = HostingStore
+                    .decode(repo.getSetting(HostingStore.SETTINGS_KEY))
+                    .firstOrNull { it.id == id } ?: error("That hosted service no longer exists")
+                val layout = HostingManager.layout(context, service)
+                SiteTools.removeCertificate(layout)
+                if (HostingRuntime.state(id).running) {
+                    HostingManager.restart(context, service)
+                }
+                emit("Certificate removed from ${service.name}")
+            }.onFailure { emit(it.message ?: "Could not remove the certificate", true) }
+        }
+    }
+
+    private suspend fun mysqlService(): HostedService? =
+        HostingStore.decode(repo.getSetting(HostingStore.SETTINGS_KEY))
+            .firstOrNull { it.kind == "mysql" }
+
+    /** Load MySQL schemas and the server banner for the Databases tab. */
+    fun refreshDatabases() {
+        if (_databaseBusy.value) return
+        val context = getApplication<Application>()
+        viewModelScope.launch {
+            _databaseBusy.value = true
+            runCatching {
+                val mysql = mysqlService() ?: return@runCatching
+                _databaseVersion.value = SiteTools.databaseVersion(context, mysql)
+                _databases.value = SiteTools.databases(context, mysql)
+            }.onFailure {
+                _databaseVersion.value = null
+                emit(it.message ?: "Could not read the databases", true)
+            }
+            _databaseBusy.value = false
+        }
+    }
+
+    fun createDatabase(name: String) {
+        val context = getApplication<Application>()
+        viewModelScope.launch {
+            runCatching {
+                val mysql = mysqlService() ?: error("Add a MySQL service first.")
+                val db = SiteTools.createDatabase(context, mysql, name)
+                _databases.value = SiteTools.databases(context, mysql)
+                emit("Database $db created")
+            }.onFailure { emit(it.message ?: "Could not create the database", true) }
+        }
+    }
+
+    fun dropDatabase(name: String) {
+        val context = getApplication<Application>()
+        viewModelScope.launch {
+            runCatching {
+                val mysql = mysqlService() ?: error("Add a MySQL service first.")
+                SiteTools.dropDatabase(context, mysql, name)
+                _databases.value = SiteTools.databases(context, mysql)
+                emit("Database $name dropped")
+            }.onFailure { emit(it.message ?: "Could not drop the database", true) }
+        }
+    }
+
+    /**
+     * Create the schema for one site and inject ready-to-use connection
+     * variables into its environment.
+     */
+    fun attachSiteDatabase(id: String) {
+        val context = getApplication<Application>()
+        viewModelScope.launch {
+            runCatching {
+                val mysql = mysqlService() ?: error("Add a MySQL service first.")
+                val current = HostingStore.decode(repo.getSetting(HostingStore.SETTINGS_KEY))
+                val service = current.firstOrNull { it.id == id }
+                    ?: error("That hosted service no longer exists")
+                val name = SiteDatabases.siteDatabase(service.id)
+                val db = SiteTools.createDatabase(context, mysql, name)
+                val env = service.env + mapOf(
+                    "DB_HOST" to "127.0.0.1",
+                    "DB_PORT" to mysql.port.toString(),
+                    "DB_NAME" to db,
+                    "DB_USER" to mysql.username,
+                    "DB_PASSWORD" to mysql.password,
+                    "DATABASE_URL" to SiteDatabases.url(
+                        "127.0.0.1",
+                        mysql.port,
+                        db,
+                        mysql.username,
+                        mysql.password,
+                    ),
+                )
+                val updated = service.copy(dbName = db, env = env)
+                val next = current.map { if (it.id == id) updated else it }
+                repo.putSetting(
+                    HostingStore.SETTINGS_KEY,
+                    HostingStore.encode(HostingStore.require(next, blockedHostingPorts())),
+                )
+                refreshSettings()
+                ProxyForegroundService.syncHosting(context)
+                if (HostingRuntime.state(id).running) {
+                    HostingManager.restart(context, updated)
+                }
+                _databases.value = mysqlService()?.let { SiteTools.databases(context, it) }
+                    ?: _databases.value
+                emit("Database $db attached to ${service.name}")
+            }.onFailure { emit(it.message ?: "Could not attach the database", true) }
         }
     }
 

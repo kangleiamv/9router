@@ -689,6 +689,16 @@ object HostingManager {
         // returns and must not start the service again.
     }
 
+    /**
+     * Stop and start a service so new environment values or a freshly
+     * generated certificate are picked up by the running process.
+     */
+    suspend fun restart(context: Context, service: HostedService) {
+        val wasRunning = synchronized(lock) { running.containsKey(service.id) }
+        stop(service.id)
+        if (wasRunning) start(context, service)
+    }
+
     suspend fun stopAll() {
         val ids = synchronized(lock) { running.keys.toList() }
         ids.forEach { id -> runCatching { stop(id) } }

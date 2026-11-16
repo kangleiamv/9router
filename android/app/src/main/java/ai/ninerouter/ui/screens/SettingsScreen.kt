@@ -1,5 +1,6 @@
 package ai.ninerouter.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,6 +22,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -34,6 +36,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -54,6 +57,7 @@ import ai.ninerouter.ui.theme.Rose
 import ai.ninerouter.ui.theme.TextMuted
 import ai.ninerouter.ui.theme.TextPrimary
 import ai.ninerouter.ui.theme.TextSecondary
+import ai.ninerouter.ui.theme.ThemeMode
 
 @Composable
 fun SettingsScreen(viewModel: MainViewModel) {
@@ -90,6 +94,37 @@ fun SettingsScreen(viewModel: MainViewModel) {
                 subtitle = "Gateway, storage and device behaviour",
                 trailing = { StatusPill(if (running) "Running" else "Stopped", if (running) Emerald else Rose) }
             )
+        }
+        item {
+            val context = LocalContext.current
+            var mode by remember { mutableStateOf(ThemeMode.stored(context)) }
+            AppCard {
+                Text("Appearance", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "The dashboard, hosting console and every dialog follow this choice.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextMuted,
+                )
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ThemeChoice(
+                        label = "System",
+                        selected = mode == ThemeMode.SYSTEM,
+                        modifier = Modifier.weight(1f),
+                    ) { mode = ThemeMode.SYSTEM; ThemeMode.set(context, mode) }
+                    ThemeChoice(
+                        label = "Light",
+                        selected = mode == ThemeMode.LIGHT,
+                        modifier = Modifier.weight(1f),
+                    ) { mode = ThemeMode.LIGHT; ThemeMode.set(context, mode) }
+                    ThemeChoice(
+                        label = "Dark",
+                        selected = mode == ThemeMode.DARK,
+                        modifier = Modifier.weight(1f),
+                    ) { mode = ThemeMode.DARK; ThemeMode.set(context, mode) }
+                }
+            }
         }
         item {
             AppCard {
@@ -246,5 +281,33 @@ private fun InfoRow(label: String, value: String) {
     ) {
         Text(label, style = MaterialTheme.typography.bodySmall, color = TextMuted, modifier = Modifier.weight(1f))
         Text(value, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+    }
+}
+
+/** Small segmented choice used by the appearance card. */
+@Composable
+private fun ThemeChoice(
+    label: String,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    Surface(
+        onClick = onClick,
+        modifier = modifier,
+        shape = RoundedCornerShape(10.dp),
+        color = if (selected) Brand.copy(alpha = 0.14f) else AppSurfaceHigh,
+        border = BorderStroke(1.dp, if (selected) Brand.copy(alpha = 0.45f) else AppBorder),
+    ) {
+        Column(
+            Modifier.padding(horizontal = 11.dp, vertical = 11.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text(
+                label,
+                style = MaterialTheme.typography.titleSmall,
+                color = if (selected) Brand else TextPrimary,
+            )
+        }
     }
 }

@@ -19,8 +19,8 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 | Routing | Combos, vision combo, per-account fallback, exponential backoff, model locks |
 | Telegram | Bot API long polling inside the foreground service, `/help` `/model` `/combo` `/vision` `/status` `/quota` `/clear` |
 | Cloudflare Tunnel | Optional public endpoint via a bundled native `cloudflared` connector: quick `trycloudflare.com` URLs or named Zero Trust tunnels, plus local links that each choose their own quick connector or the shared named tunnel; HTTP apps, an optional on-device FTP host with a browser file view, and named TCP routes for databases and SSH |
-| Hosting | Supervised on-device PHP, Node.js, Python, Redis, PostgreSQL and MySQL runtimes on loopback. Web runtimes take ZIP deployments with immutable releases, environment variables, an optional build command, activate/rollback and one-tap publishing to a local link. PHP, Node.js, MariaDB and PostgreSQL are bundled as arm64 native libraries; every service gets an app-owned folder, generated credentials, log capture and restarts |
-| UI | Compose Material 3, Obsidian dark theme, drawer navigation |
+| Hosting | Tabbed on-device hosting console: supervised static, PHP, Node.js, Python, Redis, PostgreSQL and MariaDB runtimes on loopback, immutable ZIP/folder releases with rollback, hostnames routed through named local links, MariaDB schema administration through bundled PDO, self-signed TLS pairs from bundled OpenSSL, multi-account FTP logins, a file manager and per-site storage. Every service gets an app-owned folder, generated credentials, log capture and restarts |
+| UI | Compose Material 3, complete dark and light palettes, animated drawer navigation, System/Light/Dark appearance picker |
 | Background | Foreground service + boot receiver (auto-start optional) |
 
 ## Screens
@@ -32,7 +32,7 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 - **Usage** — animated 7-day/hourly charts, provider and status breakdowns, and a dedicated Overview / Request log switcher with a day-grouped, filterable request feed
 - **Quota Tracker** — live provider limits (Antigravity, Gemini CLI, Claude, DeepSeek, Groq, GLM, OpenCode, Vercel AI Gateway, Ollama Cloud, MiniMax), animated gauges, reset countdowns, local usage fallback, and cooldown/model-lock tracking
 - **Telegram Bot** — bot token, owner chat id, routing, notifications, commands
-- **Hosting** — dedicated page in the drawer for the hosting surface only: start PHP/Node.js/Python/Redis/PostgreSQL/MySQL on loopback, deploy ZIPs or device folders as immutable releases, activate/rollback, edit environment variables and build commands, browse files, publish a service to a local link, and read per-service logs
+- **Hosting** — full hosting console with Overview, Websites, Databases, FTP, SSL and Storage tabs: start static/PHP/Node.js/Python/Redis/PostgreSQL/MariaDB on loopback, create a site with a free port and starter page, deploy ZIPs or device folders as immutable releases, activate/rollback, assign hostnames (auto-creating a named local link), attach a MariaDB schema with injected `DB_*`/`DATABASE_URL`, issue or remove a self-signed certificate, manage per-site FTP accounts, browse files and inspect storage
 - **Cloudflare Tunnel** — quick or named tunnel, public URL with copy/open/retry, connector state and live log tail, an optional FTP host serving device storage, and local links where every link chooses a dedicated Quick tunnel or the shared Named tunnel; the editor fills service presets and detects listening loopback ports
 - **Console Log** — live day-grouped request inspector with status filters, collapsible search, expandable request/response payloads and one-tap copy
 - **Settings** — port, auto-start, retention, storage, runtime info
@@ -69,10 +69,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.19>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.20>.
 
 ```bash
-adb install -r 9router-android-1.3.19-debug.apk
+adb install -r 9router-android-1.3.20-debug.apk
 ```
 
 The APK is about 98 MB because it carries the arm64 hosting runtimes. It builds
@@ -395,12 +395,15 @@ connector is unavailable.
 
 ### Hosting runtimes
 
-The **Hosting** card starts real PHP, Node.js, Python, Redis, PostgreSQL and
-MySQL processes. Each service gets an app-owned folder under
+The **Hosting** console starts real static, PHP, Node.js, Python, Redis,
+PostgreSQL and MariaDB processes. Each service gets an app-owned folder under
 `files/hosting/<id>` with `releases` for deployments, `public` for the legacy
 folder used before the first deploy, `data` for database files, and `home`,
 `tmp` and `logs` beside them.
 
+- **Static** — the bundled Node binary runs a small static server over the
+  active release, with a starter `index.html` written on creation and on the
+  first start. No server code is required for plain HTML/CSS/JS sites.
 - **PHP** — `php -S 127.0.0.1:<port> -t <public>` with four CLI-server workers
   and a starter `index.php`.
 - **Node.js** — `node server.js` with `PORT`, `HOST=127.0.0.1` and `DOCROOT`,
@@ -425,9 +428,30 @@ folder used before the first deploy, `data` for database files, and `home`,
   database and a generated user and password. A folder left behind by a failed
   bootstrap is cleared so the next start can initialize cleanly.
 
-The **Hosting** page in the navigation drawer shows this surface on its own,
-without the tunnel, FTP and local-link panels. Both views read the same stored
-services and runtime state.
+The **Hosting** page in the navigation drawer is a complete console with six
+tabs. Both it and the tunnel's hosting card read the same stored services and
+runtime state.
+
+- **Overview** — live count of running services, sites and database servers,
+  device usage, runtime availability, quick actions and the latest process
+  output.
+- **Websites** — filter by running/stopped, create a site (the next free
+  loopback port is allocated automatically), start/stop, open the local URL,
+  and open the manage sheet for deploys, files, releases, environment, domain,
+  port, publishing, database and TLS.
+- **Databases** — MariaDB banner/credentials, schema list with size, create and
+  drop database, and attach/refresh a schema per site. Attaching injects
+  `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` and
+  `DATABASE_URL`, then restarts the site. PostgreSQL stays connection-info only
+  because the app ships no `psql` or `pdo_pgsql`.
+- **FTP** — enable the loopback server, set its port and primary credentials,
+  and manage up to eight extra accounts, each with its own folder, read-only
+  flag and optional site owner. Site accounts follow the active release, so
+  they survive redeploys.
+- **SSL** — per-site self-signed certificate state, days left, SHA-256 and
+  subject alternative names, with generate/renew and remove actions.
+- **Storage** — total hosting usage, free device space, and content/data/log
+  sizes per runtime with a direct link to its file manager.
 
 Each service row also shows its **storage**: the size of its code, database and
 log folders plus the free space left on the device, and a **Files** button that
@@ -442,6 +466,40 @@ legacy `public` folder before the first deploy) in a small file manager:
 Uploads and edits are written through a temporary sibling file, so a crash
 cannot truncate a served file. Paths are resolved below the service folder and
 `..`, absolute paths and symlink escapes are refused.
+
+#### Domains, databases, TLS and FTP accounts
+
+Assigning a **hostname** in a site's manage sheet validates it, stores it on the
+service and creates or updates a named local link with that host, so
+`http://<host>:<publicPort>/` reaches the site as soon as the gateway runs.
+Removing the hostname removes the link. Real domains still need the same
+hostname added to the Cloudflare tunnel.
+
+**Databases** are real schemas on the bundled MariaDB service. The app connects
+through the bundled PHP PDO MySQL driver, using the credentials the MariaDB
+planner generated (that user has global grants), so creating and dropping
+schemas needs no external client. Site schemas are named `site_<id>`.
+
+**TLS** pairs are generated on-device by the bundled PHP OpenSSL extension into
+`files/hosting/<id>/data/tls` (`cert.pem`, `key.pem`, key mode 0600) and cover
+the site hostname, `<id>.localhost` and `localhost`. When a pair exists the
+runtime receives `TLS_CERT`, `TLS_KEY` and `SSL_CERT_FILE`, and running sites
+restart to pick them up. Public HTTPS is still terminated by Cloudflare at the
+tunnel edge; the local pair is for local previews and apps that need a key pair.
+
+**FTP accounts** extend the single host login with up to eight extra users.
+Each has a username, password, read-only flag, folder and optional owning site.
+The embedded Apache FtpServer listener still binds loopback and shares the
+passive range; per-site folders are resolved to the active release at start.
+
+#### Appearance
+
+The app ships two complete palettes. **Settings → Appearance** offers System,
+Light and Dark, and the drawer header has a one-tap sun/moon toggle. The choice
+is stored in SharedPreferences before the first frame, and changing it recreates
+the activity so every existing colour reference follows the active palette.
+Screen changes use fade/slide transitions and the hosting tabs animate their
+selection pill.
 
 #### Deployments (ZIP or folder → release → activate)
 

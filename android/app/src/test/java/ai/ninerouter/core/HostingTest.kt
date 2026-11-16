@@ -97,9 +97,10 @@ class HostingTest {
     fun `kind catalog exposes the supported runtimes`() {
         val ids = HostedKinds.all.map { it.id }
         assertEquals(
-            listOf("php", "node", "python", "redis", "postgres", "mysql"),
+            listOf("static", "php", "node", "python", "redis", "postgres", "mysql"),
             ids,
         )
+        assertTrue(HostedKinds.static.web)
         assertTrue(HostedKinds.php.web)
         assertFalse(HostedKinds.redis.web)
         assertEquals(TunnelLinks.KIND_TCP, HostedKinds.mysql.linkKind)
@@ -375,5 +376,117 @@ class HostingTest {
         )
         assertEquals("php-3", HostingStore.newId("php", existing))
         assertEquals("node", HostingStore.newId("node", existing))
+    }
+
+    @Test
+    fun `static site plans the bundled server and scaffolds a page`() {
+        val layout = layout()
+        val plan = HostingPlanner.plan(
+            service("static", 8080),
+            layout,
+            binaries("node"),
+        )
+        assertEquals(File("/data/usr/bin/node"), plan.program)
+        assertEquals(layout.content.absolutePath, plan.env["DOCROOT"])
+        assertEquals("8080", plan.env["PORT"])
+        assertTrue(plan.files.keys.any { it.name == "9router-static-server.js" })
+        val starter = plan.scaffold.keys.first { it.name == "index.html" }
+        assertTrue(plan.scaffold.getValue(starter).contains("Your site is live"))
+    }
+
+    @Test
+    fun `tls environment is injected only when a pair exists`() {
+        val layout = layout()
+        val service = service("node", 3000)
+        val plain = HostingPlanner.plan(service, layout, binaries("node"))
+        assertNull(plain.env["TLS_CERT"])
+
+        val directory = File(layout.data, SiteTls.DIR).apply { mkdirs() }
+        SiteTls.certFile(layout).writeText("cert")
+        SiteTls.keyFile(layout).writeText("key")
+        val secure = HostingPlanner.plan(service, layout, binaries("node"))
+        assertEquals(SiteTls.certFile(layout).absolutePath, secure.env["TLS_CERT"])
+        assertEquals(SiteTls.keyFile(layout).absolutePath, secure.env["TLS_KEY"])
+        assertEquals(SiteTls.certFile(layout).absolutePath, secure.env["SSL_CERT_FILE"])
+        assertTrue(directory.isDirectory)
+    }
+
+    @Test
+    fun `domains are normalised and must be unique`() {
+        val shop = HostingStore.require(
+            listOf(service("static", 8080).copy(domain = " Shop.Example.COM ")),
+        ).single()
+        assertEquals("shop.example.com", shop.domain)
+
+        val local = HostingStore.require(
+            listOf(service("static", 8080).copy(domain = "portfolio.localhost")),
+        ).single()
+        assertEquals("portfolio.localhost", local.domain)
+
+        assertTrue(
+            runCatching {
+                HostingStore.require(listOf(service("static", 8080).copy(domain = "not a host")))
+            }.isFailure,
+        )
+        assertTrue(
+            runCatching {
+                HostingStore.require(
+                    listOf(
+                        service("static", 8080).copy(domain = "same.example.com"),
+                        HostingStore.require(
+                            listOf(service("php", 8081).copy(domain = "same.example.com")),
+                        ).single(),
+                    ),
+                )
+            }.isFailure,
+        )
+    }
+
+    @Test
+    fun `database names are normalised with a site default`() {
+        assertEquals("site_shop", SiteDatabases.siteDatabase("Shop"))
+        assertEquals("app_1", SiteDatabases.normalize("  App-1  "))
+        assertEquals("site_shop", SiteDatabases.siteDatabase("shop"))
+        assertEquals("CREATE DATABASE IF NOT EXISTS `site_shop` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci",
+            SiteDatabases.createSql("site_shop"))
+        assertEquals("DROP DATABASE IF EXISTS `site_shop`", SiteDatabases.dropSql("site_shop"))
+        assertTrue(runCatching { SiteDatabases.normalize("___") }.isFailure)
+        val url = SiteDatabases.url("127.0.0.1", 3306, "site_shop", "9router", "p@ss word")
+        assertTrue(url.startsWith("mysql://9router:p%40ss+word@127.0.0.1:3306/site_shop"))
+    }
+
+    @Test
+    fun `database list parsing ignores headers and system rows`() {
+        val parsed = SiteDatabases.parseList(
+            "OK\nsite_shop\t4096\nmysql\t1024\nnot a name\t1",
+        )
+        assertEquals(listOf("site_shop", "mysql"), parsed.map { it.name })
+        assertEquals(4096L, parsed.first().bytes)
+        assertTrue(parsed.first().user)
+        assertFalse(parsed.last().user)
+        assertTrue(SiteDatabases.parseList("garbage").isEmpty())
+    }
+
+    @Test
+    fun `next port skips used and reserved ports`() {
+        assertEquals(8080, HostingStore.nextPort(8080, used = listOf(3000)))
+        assertEquals(8082, HostingStore.nextPort(8080, used = listOf(8080, 8081)))
+        assertEquals(8083, HostingStore.nextPort(8080, used = listOf(8080, 8081, 8082), blocked = listOf(9000)))
+        assertEquals(8081, HostingStore.nextPort(8080, used = listOf(3000), blocked = listOf(8080)))
+        assertEquals(1024, HostingStore.nextPort(80, used = emptyList()))
+    }
+
+    @Test
+    fun `certificate names cover the domain and local previews`() {
+        val names = SiteTls.namesFor(
+            service("static", 8080).copy(domain = "shop.example.com"),
+        )
+        assertEquals(listOf("shop.example.com", "static.localhost", "localhost"), names)
+        assertTrue(SiteTls.sanEntry(listOf("shop.example.com", "127.0.0.1")).contains("DNS:shop.example.com"))
+        assertTrue(SiteTls.sanEntry(listOf("shop.example.com", "127.0.0.1")).contains("IP:127.0.0.1"))
+        val config = SiteTls.config("shop.example.com", names)
+        assertTrue(config.contains("CN = shop.example.com"))
+        assertTrue(config.contains("subjectAltName = DNS:shop.example.com"))
+        assertTrue(SiteTls.GENERATE_SCRIPT.contains("openssl_x509_export"))
     }
 }

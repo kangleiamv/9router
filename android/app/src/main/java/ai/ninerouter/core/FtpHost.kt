@@ -18,6 +18,19 @@ import java.io.File
  * folder, which needs no storage permission. Shared storage needs All files
  * access (or the legacy read/write permissions on older Android versions).
  */
+/**
+ * One FTP login. [root] is an absolute folder; blank means the host root.
+ * [serviceId] links the account to a hosted site so the UI can show its owner.
+ */
+@Serializable
+data class FtpAccount(
+    val username: String = "",
+    val password: String = "",
+    val root: String = "",
+    val readOnly: Boolean = false,
+    val serviceId: String = "",
+)
+
 @Serializable
 data class FtpHostSettings(
     val enabled: Boolean = false,
@@ -26,6 +39,8 @@ data class FtpHostSettings(
     val password: String = "",
     val root: String = "",
     val readOnly: Boolean = false,
+    /** Additional logins served by the same listener. */
+    val accounts: List<FtpAccount> = emptyList(),
 )
 
 enum class FtpHostStatus { STOPPED, STARTING, RUNNING, ERROR }
@@ -87,11 +102,15 @@ object FtpHostStore {
     const val DEFAULT_PORT = 2121
     const val MIN_PORT = 1024
     const val PASSIVE_PORTS = "41000-41009"
+    const val MAX_ACCOUNTS = 8
 
     /** Passive data ports, all bound to loopback by the embedded server. */
     val passivePorts: IntRange = 41000..41009
 
     fun isPassivePort(port: Int): Boolean = port in passivePorts
+
+    fun newPassword(): String =
+        java.util.UUID.randomUUID().toString().replace("-", "").take(12) + "9r"
 
     val defaults: FtpHostSettings = FtpHostSettings()
 
@@ -99,18 +118,34 @@ object FtpHostStore {
         if (raw.isNullOrBlank()) return defaults
         return runCatching {
             val stored = Json.lenient.decodeFromString<FtpHostSettings>(raw)
-            stored.copy(password = Crypto.decrypt(stored.password).orEmpty())
+            stored.copy(
+                password = Crypto.decrypt(stored.password).orEmpty(),
+                accounts = stored.accounts.map {
+                    it.copy(password = Crypto.decrypt(it.password).orEmpty())
+                },
+            )
         }.getOrDefault(defaults)
     }
 
     fun encode(settings: FtpHostSettings): String {
         val safe = require(settings)
         return Json.compact.encodeToString(
-            if (safe.password.isBlank()) {
-                safe
-            } else {
-                safe.copy(password = Crypto.encrypt(safe.password) ?: safe.password)
-            },
+            safe.copy(
+                password = if (safe.password.isBlank()) {
+                    ""
+                } else {
+                    Crypto.encrypt(safe.password) ?: safe.password
+                },
+                accounts = safe.accounts.map {
+                    it.copy(
+                        password = if (it.password.isBlank()) {
+                            ""
+                        } else {
+                            Crypto.encrypt(it.password) ?: it.password
+                        },
+                    )
+                },
+            ),
         )
     }
 
@@ -139,7 +174,42 @@ object FtpHostStore {
         if (username.any { it.code < 0x20 } || settings.password.any { it.code < 0x20 }) {
             throw IllegalArgumentException("FTP credentials cannot contain control characters.")
         }
+        val accounts = settings.accounts.map { account ->
+            val name = account.username.trim()
+            if (name.isEmpty()) throw IllegalArgumentException("FTP accounts need a username.")
+            if (!name.matches(Regex("[A-Za-z0-9_.@-]{1,32}"))) {
+                throw IllegalArgumentException("FTP usernames allow letters, digits, _ . @ and -.")
+            }
+            if (account.password.isEmpty() && !name.equals("anonymous", true)) {
+                throw IllegalArgumentException("Set a password for FTP account '$name'.")
+            }
+            if (account.password.any { it.code < 0x20 }) {
+                throw IllegalArgumentException("FTP passwords cannot contain control characters.")
+            }
+            val home = account.root.trim()
+            if (home.isNotEmpty()) {
+                val absolute = runCatching { File(home).isAbsolute }.getOrDefault(false)
+                if (!absolute || home.contains("..")) {
+                    throw IllegalArgumentException(
+                        "FTP account '$name' needs an absolute folder without '..'.",
+                    )
+                }
+            }
+            account.copy(username = name, root = home)
+        }
+        val duplicate = accounts.map { it.username.lowercase() }
+            .groupingBy { it }
+            .eachCount()
+            .filterValues { it > 1 }
+            .keys
+        if (duplicate.isNotEmpty()) {
+            throw IllegalArgumentException("FTP username '${duplicate.first()}' is used twice.")
+        }
+        if (accounts.size > MAX_ACCOUNTS) {
+            throw IllegalArgumentException("At most $MAX_ACCOUNTS FTP accounts are supported.")
+        }
         return settings.copy(
+            accounts = accounts,
             username = username,
             password = settings.password,
             root = root,

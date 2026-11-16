@@ -55,6 +55,7 @@ import ai.ninerouter.engine.ProviderCatalog
 import ai.ninerouter.engine.ProviderSpec
 import ai.ninerouter.ui.theme.Amber
 import ai.ninerouter.ui.theme.AppBorder
+import ai.ninerouter.ui.theme.AppPalette
 import ai.ninerouter.ui.theme.AppSurface
 import ai.ninerouter.ui.theme.AppSurfaceHigh
 import ai.ninerouter.ui.theme.Brand
@@ -461,14 +462,14 @@ fun CodeBlock(text: String, modifier: Modifier = Modifier) {
     Surface(
         modifier = modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.small,
-        color = Color(0xFF0C0C10),
+        color = if (AppPalette.dark) Color(0xFF0C0C10) else Color(0xFFF4F0EB),
         border = BorderStroke(1.dp, AppBorder)
     ) {
         Text(
             text = text,
             modifier = Modifier.padding(12.dp),
             style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-            color = Color(0xFFD4D4D8),
+            color = if (AppPalette.dark) Color(0xFFD4D4D8) else Color(0xFF3F3A35),
             maxLines = 14,
             overflow = TextOverflow.Clip
         )

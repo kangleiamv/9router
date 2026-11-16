@@ -37,6 +37,17 @@ data class HostedKind(
 }
 
 object HostedKinds {
+    val static = HostedKind(
+        id = "static",
+        label = "Static site",
+        blurb = "HTML, CSS and JS served by the bundled static server",
+        port = 8080,
+        scheme = "http",
+        linkKind = TunnelLinks.KIND_HTTP,
+        defaultUser = "",
+        binaries = listOf("node"),
+        bundled = true,
+    )
     val php = HostedKind(
         id = "php",
         label = "PHP",
@@ -104,7 +115,7 @@ object HostedKinds {
         bundled = true,
     )
 
-    val all: List<HostedKind> = listOf(php, node, python, redis, postgres, mysql)
+    val all: List<HostedKind> = listOf(static, php, node, python, redis, postgres, mysql)
 
     fun byId(id: String): HostedKind? = all.firstOrNull { it.id == id }
 
@@ -142,6 +153,10 @@ data class HostedService(
     val active: String = "",
     /** Folder served inside the active release, for example `public`. */
     val publicDir: String = "",
+    /** Public hostname assigned in the Domains tab, for example `shop.example.com`. */
+    val domain: String = "",
+    /** MySQL schema created for this site, empty until the database is added. */
+    val dbName: String = "",
 ) {
     val spec: HostedKind? get() = HostedKinds.byId(kind)
 
@@ -198,6 +213,11 @@ object HostingStore {
 
     /** Runtimes that need a generated password before they are published. */
     val DATABASE_KINDS = setOf("redis", "postgres", "mysql")
+
+    /** Public hostname shape accepted for a site domain. */
+    private val DOMAIN_REGEX = Regex(
+        "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$",
+    )
 
     fun decode(raw: String?): List<HostedService> {
         if (raw.isNullOrBlank()) return emptyList()
@@ -278,6 +298,20 @@ object HostingStore {
             if (env.size > MAX_ENV_VARS) {
                 throw IllegalArgumentException("At most $MAX_ENV_VARS environment variables are supported.")
             }
+            val domain = service.domain.trim().lowercase()
+            if (domain.isNotEmpty() && !domain.matches(DOMAIN_REGEX)) {
+                throw IllegalArgumentException(
+                    "Domain must look like shop.example.com (letters, digits and dashes).",
+                )
+            }
+            if (domain.isNotEmpty() && domain.endsWith(".localhost") &&
+                domain.removeSuffix(".localhost").contains('.')
+            ) {
+                throw IllegalArgumentException("Use a single local name, such as shop.localhost.")
+            }
+            val dbName = service.dbName.trim().lowercase().let { raw ->
+                if (raw.isEmpty()) "" else SiteDatabases.normalize(raw)
+            }
             val releases = service.releases
                 .distinctBy { it.id }
                 .filter { it.id.matches(Regex("[0-9]{1,20}")) }
@@ -285,6 +319,8 @@ object HostingStore {
             service.copy(
                 name = name,
                 entry = entry,
+                domain = domain,
+                dbName = dbName,
                 username = username,
                 password = password,
                 port = service.port,
@@ -295,7 +331,31 @@ object HostingStore {
                 publicDir = if (service.publicDir.contains("..")) "" else service.publicDir.trim('/'),
             )
         }
+        val duplicateDomain = normalized.map { it.domain }
+            .filter { it.isNotEmpty() }
+            .groupingBy { it }
+            .eachCount()
+            .filterValues { it > 1 }
+            .keys
+        if (duplicateDomain.isNotEmpty()) {
+            throw IllegalArgumentException(
+                "Domain ${duplicateDomain.first()} is assigned to more than one site.",
+            )
+        }
         return normalized
+    }
+
+    /** Next port at or above [preferred] that no runtime or 9Router service owns. */
+    fun nextPort(
+        preferred: Int,
+        used: Collection<Int>,
+        blocked: Collection<Int> = emptyList(),
+    ): Int {
+        val taken = used.toSet() + blocked.toSet()
+        val start = preferred.coerceIn(MIN_PORT, 65535)
+        for (port in start..65535) if (port !in taken) return port
+        for (port in MIN_PORT until start) if (port !in taken) return port
+        throw IllegalArgumentException("No free loopback port is available for a new site.")
     }
 
     /** Environment names the runtime itself owns. */
@@ -427,6 +487,15 @@ object HostingPlanner {
             env["LD_LIBRARY_PATH"] = searchDirs.joinToString(":") { it.absolutePath }
         }
         service.env.forEach { (key, value) -> env[key] = value }
+        if (spec.web) {
+            val cert = SiteTls.certFile(layout)
+            val key = SiteTls.keyFile(layout)
+            if (cert.isFile && key.isFile) {
+                env["TLS_CERT"] = cert.absolutePath
+                env["TLS_KEY"] = key.absolutePath
+                env["SSL_CERT_FILE"] = cert.absolutePath
+            }
+        }
 
         layout.content.mkdirs()
         layout.data.mkdirs()
@@ -436,6 +505,28 @@ object HostingPlanner {
         layout.runtime.mkdirs()
 
         return when (spec.id) {
+            "static" -> {
+                val starter = File(layout.home, "9router-static-server.js")
+                env["PORT"] = service.port.toString()
+                env["HOST"] = "127.0.0.1"
+                env["DOCROOT"] = layout.content.absolutePath
+                env["NODE_ENV"] = "production"
+                HostingPlan(
+                    program = bin(spec.binaries),
+                    args = listOf(starter.absolutePath),
+                    env = env,
+                    workDir = layout.content,
+                    files = mapOf(starter to NODE_SERVER),
+                    // A static site starts useful: one editable landing page.
+                    scaffold = if (service.active.isBlank()) {
+                        mapOf(File(layout.content, "index.html") to STATIC_INDEX)
+                    } else {
+                        emptyMap()
+                    },
+                    webUrl = service.webUrl,
+                )
+            }
+
             "php" -> {
                 env["DOCUMENT_ROOT"] = layout.content.absolutePath
                 // The CLI server forks workers on Linux; a single request must
@@ -726,6 +817,37 @@ net.Server.prototype.listen = function (...args) {
   });
   return listen.apply(this, args);
 };
+"""
+
+    /** Starter page for a new static site; safe to replace. */
+    private const val STATIC_INDEX = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Your site is live</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+      background: #0b0b0d; color: #f4f4f5; font: 16px/1.6 system-ui, sans-serif; }
+    main { max-width: 34rem; padding: 2.5rem; }
+    h1 { font-size: 2rem; margin: 0 0 .5rem; }
+    p { color: #a1a1aa; }
+    code { background: #1a1a1f; padding: .15rem .4rem; border-radius: .35rem; }
+    .dot { display: inline-block; width: .6rem; height: .6rem; border-radius: 50%;
+      background: #34d399; margin-right: .45rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <p><span class="dot"></span>Hosted on this device by 9Router</p>
+    <h1>Your site is live</h1>
+    <p>Edit <code>index.html</code> in the file manager, or deploy a ZIP from the
+       Hosting dashboard. Nothing here leaves the device unless you publish it
+       through a tunnel.</p>
+  </main>
+</body>
+</html>
 """
 
     private const val NODE_SERVER = """// Created by 9Router. Replace this file with your own app.

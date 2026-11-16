@@ -3,6 +3,7 @@ package ai.ninerouter
 import ai.ninerouter.ui.MainViewModel
 import ai.ninerouter.ui.NineRouterRoot
 import ai.ninerouter.ui.theme.NineRouterTheme
+import ai.ninerouter.ui.theme.ThemeMode
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
@@ -27,8 +28,9 @@ class MainActivity : ComponentActivity() {
         ) {
             runCatching { notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS) }
         }
+        val dark = ThemeMode.isDark(this)
         setContent {
-            NineRouterTheme {
+            NineRouterTheme(dark = dark) {
                 NineRouterRoot(viewModel)
             }
         }

@@ -106,17 +106,22 @@ quota tracking and the Telegram bot. Every screen is Compose — there is no
 WebView and no demo build.
 
 Download the debug APK from
-[Releases](https://github.com/kangleiamv/9router/releases/tag/android-v1.3.19),
-then `adb install -r 9router-android-1.3.19-debug.apk` (or open the file on the
+[Releases](https://github.com/kangleiamv/9router/releases/tag/android-v1.3.20),
+then `adb install -r 9router-android-1.3.20-debug.apk` (or open the file on the
 device). Build instructions are in [`android/README.md`](./android/README.md).
 The Providers screen mirrors the web registry with bundled logos, and the
 **Models** button discovers each provider's live catalog and caches it for
-pickers, combos and `/v1/models`. **Hosting** has its own page in the drawer
-and doubles as a small Vercel-style platform: PHP, Node.js and Python services
-take ZIP uploads or a folder picked from the device, keep the last five
+pickers, combos and `/v1/models`. **Hosting** has its own tabbed console in the drawer
+and doubles as a small Vercel-style platform: static, PHP, Node.js and Python
+sites take ZIP uploads or a folder picked from the device, keep the last five
 immutable releases, expose per-service environment variables and an optional
-build command, and support activate/rollback. Node.js apps report the port they
-really listen on, so apps that ignore `PORT` still work. Antigravity, Gemini CLI and Claude Code can be
+build command, and support activate/rollback. The same console manages
+hostnames (each one creates a named local link), on-device MariaDB schemas with
+ready-made `DB_*`/`DATABASE_URL` injection, self-signed TLS pairs generated with
+the bundled OpenSSL, multi-account FTP logins per site, and storage per runtime.
+Node.js apps report the port they really listen on, so apps that ignore `PORT`
+still work. The app ships complete dark and light palettes with a System/Light/
+Dark picker in Settings and a quick toggle in the drawer. Antigravity, Gemini CLI and Claude Code can be
 connected with a real OAuth sign-in from the Providers screen, and any
 OpenAI/Anthropic-compatible endpoint can be added as a custom provider with its
 own model prefix.

@@ -3,6 +3,7 @@ package ai.ninerouter.service.server
 import ai.ninerouter.core.FtpHostRuntime
 import ai.ninerouter.core.FtpHostSettings
 import ai.ninerouter.core.FtpHostStore
+import ai.ninerouter.core.HostedService
 import ai.ninerouter.util.StorageAccess
 import android.content.Context
 import java.io.File
@@ -15,17 +16,22 @@ import java.io.File
  */
 object FtpHostManager {
     @Synchronized
-    fun apply(context: Context, settings: FtpHostSettings) {
+    fun apply(
+        context: Context,
+        settings: FtpHostSettings,
+        services: List<HostedService> = emptyList(),
+    ) {
         EmbeddedFtpServer.stop()
         FtpHostRuntime.stopped()
         if (!settings.enabled) return
 
-        val root = resolveRoot(context, settings)
-        FtpHostRuntime.starting(settings, root.absolutePath)
+        val resolved = resolveSiteRoots(context, settings, services)
+        val root = resolveRoot(context, resolved)
+        FtpHostRuntime.starting(resolved, root.absolutePath)
         try {
-            prepare(context, root, settings)
-            EmbeddedFtpServer.start(settings, root)
-            FtpHostRuntime.running(settings, root.absolutePath)
+            prepare(context, root, resolved)
+            EmbeddedFtpServer.start(resolved, root)
+            FtpHostRuntime.running(resolved, root.absolutePath)
         } catch (t: Throwable) {
             EmbeddedFtpServer.stop()
             FtpHostRuntime.failed(t.message ?: "Could not start the FTP host")
@@ -46,6 +52,33 @@ object FtpHostManager {
         return File(base, "ftp")
     }
 
+    /**
+     * Site accounts follow the active release: a deploy creates a new release
+     * folder, so the home recorded when the account was created would go stale.
+     * Resolving here keeps a site owner's FTP login working after redeploys.
+     */
+    fun accountRoot(context: Context, account: ai.ninerouter.core.FtpAccount, services: List<HostedService>): File? {
+        if (account.serviceId.isBlank()) {
+            return account.root.takeIf { it.isNotBlank() }?.let { File(it) }
+        }
+        val service = services.firstOrNull { it.id == account.serviceId } ?: return null
+        return HostingManager.layout(context, service).content
+    }
+
+    private fun resolveSiteRoots(
+        context: Context,
+        settings: FtpHostSettings,
+        services: List<HostedService>,
+    ): FtpHostSettings {
+        if (settings.accounts.none { it.serviceId.isNotBlank() }) return settings
+        return settings.copy(
+            accounts = settings.accounts.map { account ->
+                val root = accountRoot(context, account, services)
+                if (root == null) account.copy(serviceId = "") else account.copy(root = root.absolutePath)
+            },
+        )
+    }
+
     private fun resolveRoot(context: Context, settings: FtpHostSettings): File =
         if (settings.root.isBlank()) defaultRoot(context) else File(settings.root.trim())
 
@@ -56,6 +89,22 @@ object FtpHostManager {
     }
 
     private fun prepare(context: Context, root: File, settings: FtpHostSettings) {
+        // Per-site accounts must point at a real folder too; an unreadable
+        // home would fail later with a protocol-level error.
+        settings.accounts.forEach { account ->
+            if (account.root.isBlank()) return@forEach
+            val home = File(account.root)
+            if (!home.exists() && !home.mkdirs()) {
+                throw IllegalStateException(
+                    "Cannot create the FTP folder for '${account.username}' at ${account.root}",
+                )
+            }
+            if (!home.isDirectory || !home.canRead()) {
+                throw IllegalStateException(
+                    "FTP home for '${account.username}' is not a readable folder: ${account.root}",
+                )
+            }
+        }
         // The app's own external folder lives under /storage too, but it is
         // sandboxed and needs no All files access.
         val shared = !isAppOwned(context, root) && FtpHostStore.needsBroadAccess(root.absolutePath)

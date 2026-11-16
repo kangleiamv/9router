@@ -1,5 +1,10 @@
 package ai.ninerouter.ui
 
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -17,10 +22,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Article
 import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.Cloud
+import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DataUsage
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
@@ -54,6 +61,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
@@ -62,6 +70,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import ai.ninerouter.BuildConfig
 import ai.ninerouter.ui.components.StatusPill
 import ai.ninerouter.ui.screens.CombosScreen
 import ai.ninerouter.ui.screens.DashboardScreen
@@ -80,6 +89,7 @@ import ai.ninerouter.ui.theme.AppSurfaceHigh
 import ai.ninerouter.ui.theme.Brand
 import ai.ninerouter.ui.theme.Emerald
 import ai.ninerouter.ui.theme.Obsidian
+import ai.ninerouter.ui.theme.ThemeMode
 import ai.ninerouter.ui.theme.Rose
 import ai.ninerouter.ui.theme.TextMuted
 import ai.ninerouter.ui.theme.TextPrimary
@@ -149,12 +159,21 @@ fun NineRouterRoot(viewModel: MainViewModel) {
                             Text("9", style = MaterialTheme.typography.headlineSmall, color = TextPrimary)
                         }
                         Spacer(Modifier.width(10.dp))
-                        Column {
+                        Column(Modifier.weight(1f)) {
                             Text("9Router", style = MaterialTheme.typography.titleLarge, color = TextPrimary)
                             Text(
-                                "android 1.0.0",
+                                "android ${BuildConfig.VERSION_NAME}",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = TextMuted
+                            )
+                        }
+                        val context = LocalContext.current
+                        val dark = ThemeMode.isDark(context)
+                        IconButton(onClick = { ThemeMode.toggle(context) }) {
+                            Icon(
+                                if (dark) Icons.Filled.LightMode else Icons.Filled.DarkMode,
+                                contentDescription = if (dark) "Switch to light theme" else "Switch to dark theme",
+                                tint = TextSecondary,
                             )
                         }
                     }
@@ -279,7 +298,15 @@ fun NineRouterRoot(viewModel: MainViewModel) {
             NavHost(
                 navController = navController,
                 startDestination = "dashboard",
-                modifier = Modifier.fillMaxSize().padding(padding)
+                modifier = Modifier.fillMaxSize().padding(padding),
+                enterTransition = {
+                    fadeIn(tween(220)) + slideInHorizontally(tween(220)) { it / 14 }
+                },
+                exitTransition = { fadeOut(tween(150)) },
+                popEnterTransition = {
+                    fadeIn(tween(200)) + slideInHorizontally(tween(200)) { -it / 14 }
+                },
+                popExitTransition = { fadeOut(tween(150)) },
             ) {
                 composable("dashboard") {
                     DashboardScreen(viewModel) { target ->

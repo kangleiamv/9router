@@ -84,4 +84,76 @@ class FtpHostTest {
         assertFalse(FtpHostStore.isPassivePort(2121))
         assertEquals("ftp://127.0.0.1:2121", FtpHostRuntime.target(2121))
     }
+
+    @Test
+    fun `accounts are validated, encrypted and restored`() {
+        val settings = FtpHostSettings(
+            enabled = true,
+            username = "android",
+            password = "primary",
+            accounts = listOf(
+                FtpAccount(username = "studio", password = "secret", readOnly = true, serviceId = "shop"),
+                FtpAccount(username = "client", password = "another", root = "/sdcard/client"),
+            ),
+        )
+        val safe = FtpHostStore.require(settings)
+        assertEquals(listOf("studio", "client"), safe.accounts.map { it.username })
+        assertTrue(safe.accounts.first().readOnly)
+        assertEquals("shop", safe.accounts.first().serviceId)
+
+        val restored = FtpHostStore.decode(FtpHostStore.encode(safe))
+        assertEquals("secret", restored.accounts.first().password)
+        assertEquals("another", restored.accounts.last().password)
+        assertEquals("/sdcard/client", restored.accounts.last().root)
+        assertEquals("primary", restored.password)
+    }
+
+    @Test
+    fun `accounts reject duplicates and unsafe folders`() {
+        assertTrue(
+            runCatching {
+                FtpHostStore.require(
+                    FtpHostSettings(
+                        accounts = listOf(
+                            FtpAccount(username = "same", password = "a"),
+                            FtpAccount(username = "SAME", password = "b"),
+                        ),
+                    ),
+                )
+            }.isFailure,
+        )
+        assertTrue(
+            runCatching {
+                FtpHostStore.require(
+                    FtpHostSettings(accounts = listOf(FtpAccount(username = "bad name", password = "x"))),
+                )
+            }.isFailure,
+        )
+        assertTrue(
+            runCatching {
+                FtpHostStore.require(
+                    FtpHostSettings(accounts = listOf(FtpAccount(username = "ok", password = "x", root = "relative"))),
+                )
+            }.isFailure,
+        )
+        assertTrue(
+            runCatching {
+                FtpHostStore.require(
+                    FtpHostSettings(accounts = listOf(FtpAccount(username = "ok", password = ""))),
+                )
+            }.isFailure,
+        )
+    }
+
+    @Test
+    fun `accounts are capped and generated passwords are usable`() {
+        val tooMany = (1..FtpHostStore.MAX_ACCOUNTS + 1).map {
+            FtpAccount(username = "user$it", password = "pw$it")
+        }
+        assertTrue(runCatching { FtpHostStore.require(FtpHostSettings(accounts = tooMany)) }.isFailure)
+
+        val generated = FtpHostStore.newPassword()
+        assertEquals(14, generated.length)
+        assertTrue(generated.endsWith("9r"))
+    }
 }

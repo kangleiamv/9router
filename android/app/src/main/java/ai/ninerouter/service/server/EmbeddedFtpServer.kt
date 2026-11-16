@@ -31,10 +31,7 @@ internal object EmbeddedFtpServer {
     @Synchronized
     fun start(settings: FtpHostSettings, root: File) {
         stop()
-        val user = BaseUser().apply {
-            name = settings.username.ifBlank { UserManager.ANONYMOUS }
-            password = settings.password
-            homeDirectory = root.absolutePath
+        fun BaseUser.applyPermissions(readOnly: Boolean) {
             enabled = true
             maxIdleTime = 0
             // BaseUser refuses a login when no authority accepts the
@@ -43,9 +40,26 @@ internal object EmbeddedFtpServer {
             // caps total sessions.
             authorities = buildList<Authority> {
                 add(ConcurrentLoginPermission(0, 0))
-                if (!settings.readOnly) add(WritePermission())
+                if (!readOnly) add(WritePermission())
             }
         }
+        val legacy = BaseUser().apply {
+            name = settings.username.ifBlank { UserManager.ANONYMOUS }
+            password = settings.password
+            homeDirectory = root.absolutePath
+            applyPermissions(settings.readOnly)
+        }
+        // Additional accounts share the listener but get their own home
+        // folder, so a site owner can be given FTP without the host root.
+        val accounts = settings.accounts.map { account ->
+            BaseUser().apply {
+                name = account.username
+                password = account.password
+                homeDirectory = account.root.ifBlank { root.absolutePath }
+                applyPermissions(account.readOnly)
+            }
+        }
+        val users = if (accounts.isEmpty()) listOf(legacy) else listOf(legacy) + accounts
         val listener = ListenerFactory().apply {
             port = settings.port
             serverAddress = LOOPBACK
@@ -60,7 +74,7 @@ internal object EmbeddedFtpServer {
 
         val factory = FtpServerFactory().apply {
             addListener("default", listener)
-            userManager = DeviceUserManager(user)
+            userManager = DeviceUserManager(users)
         }
         val created = factory.createServer()
         try {
@@ -89,17 +103,18 @@ internal object EmbeddedFtpServer {
      * One configured account. Kept in memory so the plaintext password never
      * touches disk; settings encrypt it separately for the next start.
      */
-    private class DeviceUserManager(private val user: BaseUser) : UserManager {
+    private class DeviceUserManager(private val users: List<BaseUser>) : UserManager {
         override fun getUserByName(name: String?): User? =
-            user.takeIf { it.name.equals(name, ignoreCase = true) }
+            users.firstOrNull { it.name.equals(name, ignoreCase = true) }
 
-        override fun getAllUserNames(): Array<String> = arrayOf(user.name)
+        override fun getAllUserNames(): Array<String> = users.map { it.name }.toTypedArray()
 
         override fun delete(name: String?) = Unit
 
         override fun save(user: User?) = Unit
 
-        override fun doesExist(name: String?): Boolean = user.name.equals(name, ignoreCase = true)
+        override fun doesExist(name: String?): Boolean =
+            users.any { it.name.equals(name, ignoreCase = true) }
 
         override fun authenticate(authentication: Authentication): User {
             val name = when (authentication) {
@@ -111,17 +126,23 @@ internal object EmbeddedFtpServer {
                 is UsernamePasswordAuthentication -> authentication.password
                 else -> ""
             }
-            // A blank configured password accepts any password, which is how
-            // anonymous FTP clients (and blank-password accounts) behave.
-            if (!user.name.equals(name, ignoreCase = true) ||
-                (user.password.isNotEmpty() && user.password != password)
-            ) {
+            val user = getUserByName(name)
+                ?: throw AuthenticationFailedException("Invalid FTP credentials")
+            // The legacy account keeps its historical behaviour: a blank
+            // configured password accepts any password (anonymous style).
+            // Extra accounts are validated to always carry a password.
+            val legacy = users.firstOrNull()
+            val anonymousStyle = legacy === user && user.password.isEmpty()
+            if (!anonymousStyle && user.password.isNotEmpty() && user.password != password) {
+                throw AuthenticationFailedException("Invalid FTP credentials")
+            }
+            if (user.name == UserManager.ANONYMOUS && password.isNotEmpty()) {
                 throw AuthenticationFailedException("Invalid FTP credentials")
             }
             return user
         }
 
-        override fun getAdminName(): String = user.name
+        override fun getAdminName(): String = users.first().name
 
         override fun isAdmin(name: String?): Boolean = false
     }

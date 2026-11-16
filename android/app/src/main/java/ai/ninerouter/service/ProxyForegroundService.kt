@@ -303,8 +303,9 @@ class ProxyForegroundService : Service() {
     /** Start or stop the optional embedded FTP host. */
     private suspend fun applyFtpHost(settings: Map<String, String>) {
         val host = FtpHostStore.decode(settings[FtpHostStore.SETTINGS_KEY])
+        val services = HostingStore.decode(settings[HostingStore.SETTINGS_KEY])
         withContext(Dispatchers.IO) {
-            FtpHostManager.apply(this@ProxyForegroundService, host)
+            FtpHostManager.apply(this@ProxyForegroundService, host, services)
         }
     }
 

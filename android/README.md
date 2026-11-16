@@ -70,10 +70,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.22>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.23>.
 
 ```bash
-adb install -r 9router-android-1.3.22-debug.apk
+adb install -r 9router-android-1.3.23-debug.apk
 ```
 
 The APK is about 98 MB because it carries the arm64 hosting runtimes. It builds
@@ -547,8 +547,9 @@ back to any of the last five.
 1. Tap **Deploy ZIP** on a PHP, Node.js or Python service and pick a `.zip`, or
    tap **Host folder** and choose a folder with the system folder picker.
 2. The archive is extracted, or the selected folder is copied, into
-   `files/hosting/<id>/releases/<timestamp>` (200 MB and 5,000 entries at
-   most). A single wrapper folder such as `my-app/` is flattened for ZIPs;
+   `files/hosting/<id>/releases/<timestamp>` (200 MB and 50,000 items at
+   most). `.git` metadata is skipped for ZIPs and folders. A single wrapper
+   folder such as `my-app/` is flattened for ZIPs;
    a selected folder is used exactly as picked, because you chose its root.
    `.stage-*` folders are removed if a deploy fails.
    The folder is copied, not linked, so editing the original later does not

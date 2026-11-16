@@ -67,6 +67,55 @@ class HostDeployTest {
         assertTrue(failure is IllegalStateException)
     }
 
+    @Test
+    fun `imports a folder above the old 5000 item limit`() {
+        val target = File(dir(), "release")
+        val children = ArrayList<HostFolderEntry>(5_100)
+        val contents = HashMap<String, ByteArray>(5_100)
+        repeat(5_100) { index ->
+            val id = "file-$index"
+            children += HostFolderEntry(id, "$id.txt", false)
+            contents[id] = "x".toByteArray()
+        }
+        val tree = FakeTree(mapOf("root" to children), contents)
+        HostDeploy.importTree(tree, "root", target)
+        assertEquals(5_100, target.listFiles()?.size)
+    }
+
+    @Test
+    fun `skips git metadata in archives and folders`() {
+        val archive = File(dir(), "release")
+        HostDeploy.extract(
+            zip(
+                ".git/config" to "[core]".toByteArray(),
+                "assets/.git/objects/ab/cdef" to "x".toByteArray(),
+                "index.php" to "<?php echo 1;".toByteArray(),
+            ).inputStream(),
+            archive,
+        )
+        assertFalse(File(archive, ".git").exists())
+        assertFalse(File(archive, "assets/.git").exists())
+        assertTrue(File(archive, "index.php").isFile)
+
+        val folder = File(dir(), "release")
+        val tree = FakeTree(
+            nodes = mapOf(
+                "root" to listOf(
+                    HostFolderEntry("git", ".git", true),
+                    HostFolderEntry("index", "index.php", false),
+                ),
+                "git" to listOf(HostFolderEntry("config", "config", false)),
+            ),
+            contents = mapOf(
+                "config" to "[core]".toByteArray(),
+                "index" to "<?php echo 1;".toByteArray(),
+            ),
+        )
+        HostDeploy.importTree(tree, "root", folder)
+        assertFalse(File(folder, ".git").exists())
+        assertTrue(File(folder, "index.php").isFile)
+    }
+
     private class FakeTree(
         private val nodes: Map<String, List<HostFolderEntry>>,
         private val contents: Map<String, ByteArray>,

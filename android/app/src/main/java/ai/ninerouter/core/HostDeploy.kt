@@ -38,7 +38,7 @@ interface HostFolderSource {
  * folder, and only then is it activated.
  */
 object HostDeploy {
-    const val MAX_ENTRIES = 5_000
+    const val MAX_ENTRIES = 50_000
     const val MAX_BYTES = 200L * 1024 * 1024
     const val MAX_DEPTH = 24
 
@@ -52,13 +52,21 @@ object HostDeploy {
             ZipInputStream(zip.buffered()).use { input ->
                 while (true) {
                     val entry = input.nextEntry ?: break
-                    entries++
-                    if (entries > MAX_ENTRIES) {
-                        throw IllegalStateException("The archive has more than $MAX_ENTRIES entries.")
-                    }
                     // Directory entries end with `/`; trim it so the segment
                     // check below does not see an empty last part.
                     val name = entry.name.replace('\\', '/').trim('/')
+                    // Source-control metadata is never served. Dropping it
+                    // keeps archives with a bundled .git under the entry cap.
+                    if (name.split('/').any { it == ".git" }) {
+                        input.closeEntry()
+                        continue
+                    }
+                    entries++
+                    if (entries > MAX_ENTRIES) {
+                        throw IllegalStateException(
+                            "The archive has more than $MAX_ENTRIES entries.",
+                        )
+                    }
                     if (name.isBlank()) {
                         input.closeEntry()
                         continue
@@ -128,11 +136,18 @@ object HostDeploy {
                 throw IllegalStateException("That folder nests folders too deeply.")
             }
             source.children(documentId).forEach { entry ->
+                val name = entry.name.replace('\\', '/').trim('/')
+                // .git can contain tens of thousands of objects and is never
+                // part of a hosted release. Skipping it also avoids leaking
+                // repository history if the site serves the release root.
+                if (name == ".git") return@forEach
                 entries++
                 if (entries > MAX_ENTRIES) {
-                    throw IllegalStateException("The folder has more than $MAX_ENTRIES items.")
+                    throw IllegalStateException(
+                        "The folder has more than $MAX_ENTRIES items. " +
+                            "Exclude node_modules or deploy a ZIP with only the needed files.",
+                    )
                 }
-                val name = entry.name.replace('\\', '/').trim('/')
                 if (name.isBlank() || name == "." || name == ".." ||
                     name.contains('/') || name.contains('\u0000')
                 ) {

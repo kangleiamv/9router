@@ -1,0 +1,98 @@
+package ai.ninerouter.core
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.nio.file.Files
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
+
+class HostDeployTest {
+    private fun zip(vararg entries: Pair<String, ByteArray?>): ByteArray {
+        val out = ByteArrayOutputStream()
+        ZipOutputStream(out).use { zip ->
+            entries.forEach { (name, bytes) ->
+                zip.putNextEntry(ZipEntry(name))
+                if (bytes != null) zip.write(bytes)
+                zip.closeEntry()
+            }
+        }
+        return out.toByteArray()
+    }
+
+    private fun dir(): File = Files.createTempDirectory("host-deploy").toFile()
+
+    @Test
+    fun `extracts files and flattens a wrapper folder`() {
+        val target = File(dir(), "release")
+        HostDeploy.extract(
+            zip(
+                "my-app/" to null,
+                "my-app/index.php" to "<?php echo 1;".toByteArray(),
+                "my-app/assets/app.css" to "body{}".toByteArray(),
+            ).inputStream(),
+            target,
+        )
+        HostDeploy.flatten(target)
+        assertTrue(File(target, "index.php").isFile)
+        assertTrue(File(target, "assets/app.css").isFile)
+        assertFalse(File(target, "my-app").exists())
+    }
+
+    @Test
+    fun `rejects archive paths that leave the folder`() {
+        val target = File(dir(), "release")
+        val failure = runCatching {
+            HostDeploy.extract(
+                zip("../escaped.txt" to "no".toByteArray()).inputStream(),
+                target,
+            )
+        }.exceptionOrNull()
+        assertTrue(failure is IllegalStateException)
+        assertFalse(target.exists())
+    }
+
+    @Test
+    fun `rejects nested traversal segments`() {
+        val failure = runCatching {
+            HostDeploy.extract(
+                zip("assets/../../escape.txt" to "no".toByteArray()).inputStream(),
+                File(dir(), "release"),
+            )
+        }.exceptionOrNull()
+        assertTrue(failure is IllegalStateException)
+    }
+
+    @Test
+    fun `detects a public document root for php`() {
+        val root = dir()
+        File(root, "public").mkdirs()
+        File(root, "public/index.php").writeText("<?php")
+        assertEquals(HostAppLayout("public", ""), HostDeploy.detect(root, "php"))
+    }
+
+    @Test
+    fun `detects the node entry from files or package json`() {
+        val root = dir()
+        File(root, "index.js").writeText("1")
+        assertEquals("index.js", HostDeploy.detect(root, "node").entry)
+
+        val pkg = dir()
+        File(pkg, "package.json").writeText("""{"main":"src/boot.js"}""")
+        assertEquals("src/boot.js", HostDeploy.detect(pkg, "node").entry)
+
+        val empty = dir()
+        assertEquals("server.js", HostDeploy.detect(empty, "node").entry)
+    }
+
+    @Test
+    fun `detects app py for python`() {
+        val root = dir()
+        assertEquals("", HostDeploy.detect(root, "python").entry)
+        File(root, "app.py").writeText("print(1)")
+        assertEquals("app.py", HostDeploy.detect(root, "python").entry)
+    }
+}

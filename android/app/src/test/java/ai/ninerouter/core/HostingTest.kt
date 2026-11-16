@@ -39,6 +39,55 @@ class HostingTest {
     )
 
     @Test
+    fun `environment keeps custom values and refuses runtime keys`() {
+        val accepted = HostingStore.require(
+            listOf(
+                service("node", 3000).copy(
+                    env = mapOf("API_URL" to "https://example.com", "FEATURE_X" to "1"),
+                    build = "npm run build",
+                ),
+            ),
+        ).single()
+        assertEquals("https://example.com", accepted.env["API_URL"])
+        assertEquals("npm run build", accepted.build)
+
+        val reserved = runCatching {
+            HostingStore.require(listOf(service("node", 3000).copy(env = mapOf("PORT" to "1"))))
+        }.exceptionOrNull()
+        assertTrue(reserved is IllegalArgumentException)
+
+        val invalid = runCatching {
+            HostingStore.require(listOf(service("node", 3000).copy(env = mapOf("1BAD" to "x"))))
+        }.exceptionOrNull()
+        assertTrue(invalid is IllegalArgumentException)
+    }
+
+    @Test
+    fun `releases keep the active pointer only when it exists`() {
+        val release = HostRelease("1000", 1L, 42L)
+        val active = service("php", 8000).copy(releases = listOf(release), active = "1000")
+        assertEquals("1000", HostingStore.require(listOf(active)).single().active)
+
+        val stale = HostingStore.require(
+            listOf(active.copy(active = "missing")),
+        ).single()
+        assertEquals("", stale.active)
+    }
+
+    @Test
+    fun `planner applies environment variables to the process`() {
+        val layout = layout()
+        val plan = HostingPlanner.plan(
+            service("node", 3001).copy(env = mapOf("API_URL" to "https://example.com")),
+            layout,
+            binaries("node"),
+        )
+        assertEquals("https://example.com", plan.env["API_URL"])
+        assertEquals("3001", plan.env["PORT"])
+        assertEquals("127.0.0.1", plan.env["HOST"])
+    }
+
+    @Test
     fun `kind catalog exposes the supported runtimes`() {
         val ids = HostedKinds.all.map { it.id }
         assertEquals(

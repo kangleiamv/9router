@@ -1,5 +1,7 @@
 package ai.ninerouter.ui.screens
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -44,6 +46,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import android.net.Uri
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -91,20 +94,35 @@ internal fun HostingCard(
     onStop: (String) -> Unit,
     onAutoStart: (String, Boolean) -> Unit,
     onPublish: (HostedService) -> Unit,
+    onDeploy: (HostedService, Uri) -> Unit,
+    onActivateRelease: (String, String) -> Unit,
+    onDeleteRelease: (String, String) -> Unit,
+    onSaveEnvironment: (String, Map<String, String>, String) -> Unit,
 ) {
     val context = LocalContext.current
     var addOpen by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf<HostedService?>(null) }
     var openLog by remember { mutableStateOf<String?>(null) }
-    var filesFor by remember { mutableStateOf<HostedService?>(null) }
+    var filesFor by remember { mutableStateOf<String?>(null) }
+    var releasesFor by remember { mutableStateOf<String?>(null) }
+    var envFor by remember { mutableStateOf<String?>(null) }
+    var deployTarget by remember { mutableStateOf<String?>(null) }
     var storageTick by remember { mutableStateOf(0) }
     var usage by remember { mutableStateOf<Map<String, LongArray>>(emptyMap()) }
     var freeBytes by remember { mutableStateOf(0L) }
 
+    val deployPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        val target = deployTarget?.let { id -> services.firstOrNull { it.id == id } }
+        deployTarget = null
+        if (uri != null && target != null) onDeploy(target, uri)
+    }
+
     LaunchedEffect(services, storageTick) {
         val sizes = withContext(Dispatchers.IO) {
             services.associate { service ->
-                val layout = HostingManager.layout(context, service.id)
+                val layout = HostingManager.layout(context, service)
                 service.id to longArrayOf(
                     HostStorage.usage(layout.content),
                     HostStorage.usage(layout.data),
@@ -159,7 +177,7 @@ internal fun HostingCard(
         Spacer(Modifier.height(4.dp))
         Text(
             "Device storage: ${HostStorage.formatBytes(freeBytes)} free · " +
-                "code lives in files/hosting/<service>/public",
+                "code lives in files/hosting/<service>/releases",
             style = MaterialTheme.typography.labelSmall,
             color = TextMuted,
         )
@@ -202,7 +220,19 @@ internal fun HostingCard(
                 onStop = { onStop(service.id) },
                 onAutoStart = { onAutoStart(service.id, it) },
                 onPublish = { onPublish(service) },
-                onFiles = { filesFor = service },
+                onFiles = { filesFor = service.id },
+                onDeploy = {
+                    deployTarget = service.id
+                    deployPicker.launch(
+                        arrayOf(
+                            "application/zip",
+                            "application/x-zip-compressed",
+                            "application/octet-stream",
+                        ),
+                    )
+                },
+                onReleases = { releasesFor = service.id },
+                onEnv = { envFor = service.id },
                 usage = usage[service.id],
                 onDelete = { deleting = service },
             )
@@ -215,13 +245,37 @@ internal fun HostingCard(
         }
     }
 
-    filesFor?.let { service ->
-        HostFilesDialog(
-            title = "${service.name} files",
-            root = HostingManager.layout(context, service.id).content,
-            onDismiss = { filesFor = null },
-            onChanged = { storageTick++ },
-        )
+    // Resolve dialogs from the newest list so activate/delete refresh in place.
+    filesFor?.let { id ->
+        services.firstOrNull { it.id == id }?.let { service ->
+            HostFilesDialog(
+                title = "${service.name} files",
+                root = HostingManager.layout(context, service).content,
+                onDismiss = { filesFor = null },
+                onChanged = { storageTick++ },
+            )
+        }
+    }
+
+    releasesFor?.let { id ->
+        services.firstOrNull { it.id == id }?.let { service ->
+            HostReleasesDialog(
+                service = service,
+                onActivate = { release -> onActivateRelease(service.id, release) },
+                onDelete = { release -> onDeleteRelease(service.id, release) },
+                onDismiss = { releasesFor = null },
+            )
+        }
+    }
+
+    envFor?.let { id ->
+        services.firstOrNull { it.id == id }?.let { service ->
+            HostEnvDialog(
+                service = service,
+                onSave = { env, build -> onSaveEnvironment(service.id, env, build) },
+                onDismiss = { envFor = null },
+            )
+        }
     }
 
     if (addOpen) {
@@ -278,6 +332,9 @@ private fun ServiceRow(
     onAutoStart: (Boolean) -> Unit,
     onPublish: () -> Unit,
     onFiles: () -> Unit,
+    onDeploy: () -> Unit,
+    onReleases: () -> Unit,
+    onEnv: () -> Unit,
     usage: LongArray?,
     onDelete: () -> Unit,
 ) {
@@ -374,6 +431,36 @@ private fun ServiceRow(
             }
             TextButton(onClick = onDelete) {
                 Icon(Icons.Filled.Delete, contentDescription = "Delete ${service.name}", tint = Rose, modifier = Modifier.size(17.dp))
+            }
+        }
+
+        if (spec.web) {
+            service.releases.firstOrNull { it.id == service.active }?.let { release ->
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Release ${release.id} · ${HostStorage.formatBytes(release.bytes)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Emerald,
+                )
+            }
+            Row {
+                TextButton(onClick = onDeploy) {
+                    Text("Deploy ZIP", color = Brand, style = MaterialTheme.typography.labelMedium)
+                }
+                TextButton(onClick = onReleases) {
+                    Text(
+                        "Releases ${service.releases.size}",
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+                TextButton(onClick = onEnv) {
+                    Text(
+                        if (service.env.isEmpty()) "Environment" else "Environment ${service.env.size}",
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
             }
         }
 

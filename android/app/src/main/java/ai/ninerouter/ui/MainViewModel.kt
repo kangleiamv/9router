@@ -414,6 +414,90 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Replace one saved service and refresh the settings flow. */
+    private suspend fun persistHosted(updated: HostedService) {
+        val current = HostingStore.decode(repo.getSetting(HostingStore.SETTINGS_KEY))
+        val next = current.map { if (it.id == updated.id) updated else it }
+        repo.putSetting(HostingStore.SETTINGS_KEY, HostingStore.encode(next))
+        refreshSettings()
+    }
+
+    /** Upload a ZIP and turn it into a new release, like a platform deploy. */
+    fun deployHostedService(id: String, uri: Uri) {
+        val context = getApplication<Application>()
+        viewModelScope.launch {
+            val service = HostingStore
+                .decode(repo.getSetting(HostingStore.SETTINGS_KEY))
+                .firstOrNull { it.id == id }
+            if (service == null) {
+                emit("That hosted service no longer exists", true)
+                return@launch
+            }
+            runCatching {
+                val input = context.contentResolver.openInputStream(uri)
+                    ?: error("Could not read the archive.")
+                input.use { HostingManager.deploy(context, service, it) }
+            }.onSuccess { updated ->
+                persistHosted(updated)
+                emit("${updated.name}: release ${updated.active} deployed")
+            }.onFailure {
+                emit(it.message ?: "Deployment failed", true)
+            }
+        }
+    }
+
+    /** Serve another release and restart the process if it is running. */
+    fun activateHostedRelease(id: String, releaseId: String) {
+        val context = getApplication<Application>()
+        viewModelScope.launch {
+            val service = HostingStore
+                .decode(repo.getSetting(HostingStore.SETTINGS_KEY))
+                .firstOrNull { it.id == id } ?: return@launch
+            runCatching { HostingManager.activate(context, service, releaseId) }
+                .onSuccess {
+                    persistHosted(it)
+                    emit("${it.name}: release $releaseId active")
+                }
+                .onFailure { emit(it.message ?: "Could not activate the release", true) }
+        }
+    }
+
+    fun deleteHostedRelease(id: String, releaseId: String) {
+        val context = getApplication<Application>()
+        viewModelScope.launch {
+            val service = HostingStore
+                .decode(repo.getSetting(HostingStore.SETTINGS_KEY))
+                .firstOrNull { it.id == id } ?: return@launch
+            runCatching { HostingManager.deleteRelease(context, service, releaseId) }
+                .onSuccess {
+                    persistHosted(it)
+                    emit("Release $releaseId deleted")
+                }
+                .onFailure { emit(it.message ?: "Could not delete the release", true) }
+        }
+    }
+
+    /** Save environment variables and the build command, restarting if needed. */
+    fun saveHostedEnvironment(id: String, env: Map<String, String>, build: String) {
+        val context = getApplication<Application>()
+        viewModelScope.launch {
+            runCatching {
+                val current = HostingStore.decode(repo.getSetting(HostingStore.SETTINGS_KEY))
+                val service = current.firstOrNull { it.id == id }
+                    ?: error("That hosted service no longer exists")
+                val updated = service.copy(env = env, build = build)
+                val next = current.map { if (it.id == id) updated else it }
+                repo.putSetting(
+                    HostingStore.SETTINGS_KEY,
+                    HostingStore.encode(HostingStore.require(next, blockedHostingPorts())),
+                )
+                refreshSettings()
+                ProxyForegroundService.syncHosting(context)
+                emit("${service.name}: environment saved")
+            }.onFailure { emit(it.message ?: "Could not save the environment", true) }
+        }
+    }
+
     /** Probe loopback ports so the UI can mark services that are actually up. */
     fun scanLocalServices() {
         if (_scanningPorts.value) return

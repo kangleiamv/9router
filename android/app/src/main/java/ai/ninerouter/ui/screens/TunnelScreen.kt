@@ -451,6 +451,16 @@ fun TunnelScreen(viewModel: MainViewModel) {
                             editorOpen = true
                         }
                     },
+                    onDeploy = { service, uri -> viewModel.deployHostedService(service.id, uri) },
+                    onActivateRelease = { id, release ->
+                        viewModel.activateHostedRelease(id, release)
+                    },
+                    onDeleteRelease = { id, release ->
+                        viewModel.deleteHostedRelease(id, release)
+                    },
+                    onSaveEnvironment = { id, env, build ->
+                        viewModel.saveHostedEnvironment(id, env, build)
+                    },
                 )
             }
 

@@ -19,7 +19,7 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 | Routing | Combos, vision combo, per-account fallback, exponential backoff, model locks |
 | Telegram | Bot API long polling inside the foreground service, `/help` `/model` `/combo` `/vision` `/status` `/quota` `/clear` |
 | Cloudflare Tunnel | Optional public endpoint via a bundled native `cloudflared` connector: quick `trycloudflare.com` URLs or named Zero Trust tunnels, plus local links that each choose their own quick connector or the shared named tunnel; HTTP apps, an optional on-device FTP host with a browser file view, and named TCP routes for databases and SSH |
-| Hosting | Supervised on-device PHP, Node.js, Python, Redis, PostgreSQL and MySQL runtimes on loopback. PHP, Node.js, MariaDB and PostgreSQL are bundled as arm64 native libraries; every service gets an app-owned folder, generated credentials, log capture, restarts and one-tap publishing to a local link |
+| Hosting | Supervised on-device PHP, Node.js, Python, Redis, PostgreSQL and MySQL runtimes on loopback. Web runtimes take ZIP deployments with immutable releases, environment variables, an optional build command, activate/rollback and one-tap publishing to a local link. PHP, Node.js, MariaDB and PostgreSQL are bundled as arm64 native libraries; every service gets an app-owned folder, generated credentials, log capture and restarts |
 | UI | Compose Material 3, Obsidian dark theme, drawer navigation |
 | Background | Foreground service + boot receiver (auto-start optional) |
 
@@ -68,10 +68,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.14>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.15>.
 
 ```bash
-adb install -r 9router-android-1.3.14-debug.apk
+adb install -r 9router-android-1.3.15-debug.apk
 ```
 
 The APK is about 98 MB because it carries the arm64 hosting runtimes. It builds
@@ -396,8 +396,9 @@ connector is unavailable.
 
 The **Hosting** card starts real PHP, Node.js, Python, Redis, PostgreSQL and
 MySQL processes. Each service gets an app-owned folder under
-`files/hosting/<id>` with `public` for web content, `data` for database files,
-and `home`, `tmp` and `logs` beside them.
+`files/hosting/<id>` with `releases` for deployments, `public` for the legacy
+folder used before the first deploy, `data` for database files, and `home`,
+`tmp` and `logs` beside them.
 
 - **PHP** — `php -S 127.0.0.1:<port> -t <public>` with four CLI-server workers
   and a starter `index.php`.
@@ -427,6 +428,38 @@ opens the code folder (`files/hosting/<id>/public`) in a small file manager:
 Uploads and edits are written through a temporary sibling file, so a crash
 cannot truncate a served file. Paths are resolved below the service folder and
 `..`, absolute paths and symlink escapes are refused.
+
+#### Deployments (ZIP → release → activate)
+
+Web runtimes work like a small Vercel/Render: upload a project archive, get an
+immutable release, then serve or roll back to any of the last five.
+
+1. Tap **Deploy ZIP** on a PHP, Node.js or Python service and pick a `.zip`.
+2. The archive is extracted into `files/hosting/<id>/releases/<timestamp>`
+   (200 MB and 5,000 entries at most). A single wrapper folder such as
+   `my-app/` is flattened, and `.stage-*` folders are removed if a deploy
+   fails.
+3. If the service has a **build command**, it runs inside the new release via
+   `/system/bin/sh -c` before activation. npm is not bundled, so vendor
+   `node_modules` in the archive or use a build step that only needs the
+   bundled runtimes.
+4. The document root is detected (`public/` for PHP, `index.js`/`server.js`/
+   `package.json` `main` for Node.js, `app.py` for Python), the release is
+   activated, and the service restarts if it was running (or immediately when
+   **Start with 9Router** is on).
+5. **Releases** lists the history with size and time. **Activate** promotes an
+   older release (rollback); **Delete** removes a release that is not serving.
+   The newest five are kept and older folders are pruned automatically.
+
+**Environment** opens a one-`NAME=value`-per-line editor plus the build
+command. Values are applied on top of the runtime defaults and survive
+restarts; `PORT`, `HOST`, `DOCROOT`, `PATH`, `LD_LIBRARY_PATH`, `HOME`,
+`TMPDIR`, `NODE_ENV`, `PGDATA`, `LANG`, `TZ`, `PWD` and `ANDROID_*` stay owned
+by the runtime. At most 32 variables are allowed.
+
+The **Files** button and the **storage** row follow the active release, so
+editing a file changes exactly what is being served. Deploying an archive does
+not touch database folders.
 
 Processes bind loopback only and are supervised: output is captured (the card
 shows the tail), an unexpected exit restarts up to three times with a backoff,

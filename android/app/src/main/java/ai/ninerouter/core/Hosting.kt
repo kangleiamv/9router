@@ -112,6 +112,14 @@ object HostedKinds {
         byId(id) ?: throw IllegalArgumentException("Unknown hosted runtime '$id'.")
 }
 
+/** One extracted deployment of a hosted web app. */
+@Serializable
+data class HostRelease(
+    val id: String,
+    val createdAt: Long,
+    val bytes: Long,
+)
+
 /** One configured runtime instance. [password] is encrypted at rest. */
 @Serializable
 data class HostedService(
@@ -124,6 +132,16 @@ data class HostedService(
     val autoStart: Boolean = false,
     val username: String = "",
     val password: String = "",
+    /** Extra process environment, applied on top of the runtime defaults. */
+    val env: Map<String, String> = emptyMap(),
+    /** Optional build command run inside a fresh deployment folder. */
+    val build: String = "",
+    /** Deployment history, newest first. */
+    val releases: List<HostRelease> = emptyList(),
+    /** Active release id; blank serves the legacy `public` folder. */
+    val active: String = "",
+    /** Folder served inside the active release, for example `public`. */
+    val publicDir: String = "",
 ) {
     val spec: HostedKind? get() = HostedKinds.byId(kind)
 
@@ -175,6 +193,8 @@ object HostingStore {
     const val MAX_SERVICES = 8
     const val MIN_PORT = 1024
     const val MAX_LOG_LINES = 200
+    const val MAX_RELEASES = 5
+    const val MAX_ENV_VARS = 32
 
     /** Runtimes that need a generated password before they are published. */
     val DATABASE_KINDS = setOf("redis", "postgres", "mysql")
@@ -250,15 +270,53 @@ object HostingStore {
             } else {
                 service.password
             }
+            val env = validateEnv(service.env)
+            val build = service.build.trim()
+            if (build.length > 500 || build.any { it == '\n' || it == '\r' }) {
+                throw IllegalArgumentException("Build command must be one line under 500 characters.")
+            }
+            if (env.size > MAX_ENV_VARS) {
+                throw IllegalArgumentException("At most $MAX_ENV_VARS environment variables are supported.")
+            }
+            val releases = service.releases.distinctBy { it.id }.take(MAX_RELEASES)
             service.copy(
                 name = name,
                 entry = entry,
                 username = username,
                 password = password,
                 port = service.port,
+                env = env,
+                build = build,
+                releases = releases,
+                active = service.active.takeIf { id -> releases.any { it.id == id } } ?: "",
+                publicDir = if (service.publicDir.contains("..")) "" else service.publicDir.trim('/'),
             )
         }
         return normalized
+    }
+
+    /** Environment names the runtime itself owns. */
+    val RESERVED_ENV = setOf(
+        "PATH", "HOME", "TMPDIR", "LD_LIBRARY_PATH", "PORT", "HOST", "DOCROOT",
+        "PWD", "NODE_ENV", "PGDATA", "LANG", "TZ", "ANDROID_DATA", "ANDROID_ROOT",
+    )
+
+    private fun validateEnv(env: Map<String, String>): Map<String, String> {
+        val clean = linkedMapOf<String, String>()
+        env.forEach { (rawKey, rawValue) ->
+            val key = rawKey.trim()
+            if (!key.matches(Regex("[A-Za-z_][A-Za-z0-9_]{0,63}"))) {
+                throw IllegalArgumentException("Invalid environment name '$rawKey'.")
+            }
+            if (key.uppercase() in RESERVED_ENV) {
+                throw IllegalArgumentException("$key is set by the runtime and cannot be overridden.")
+            }
+            if (rawValue.length > 4096 || rawValue.contains('\u0000')) {
+                throw IllegalArgumentException("$key has an invalid value.")
+            }
+            clean[key] = rawValue
+        }
+        return clean
     }
 
     /** Fresh id for a new service of [kind]. */
@@ -286,6 +344,9 @@ data class HostLayout(
     val runtime: File,
 ) {
     val logs: File get() = File(root, "logs")
+
+    /** Immutable deployment folders, `releases/<id>`. */
+    val releases: File get() = File(root, "releases")
 }
 
 data class HostSetupStep(
@@ -362,6 +423,7 @@ object HostingPlanner {
         if (searchDirs.isNotEmpty()) {
             env["LD_LIBRARY_PATH"] = searchDirs.joinToString(":") { it.absolutePath }
         }
+        service.env.forEach { (key, value) -> env[key] = value }
 
         layout.content.mkdirs()
         layout.data.mkdirs()

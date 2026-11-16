@@ -1,7 +1,9 @@
 package ai.ninerouter.service.server
 
 import ai.ninerouter.core.HostBootstrap
+import ai.ninerouter.core.HostDeploy
 import ai.ninerouter.core.HostLayout
+import ai.ninerouter.core.HostRelease
 import ai.ninerouter.core.HostServiceState
 import ai.ninerouter.core.HostStatus
 import ai.ninerouter.core.HostedKind
@@ -9,6 +11,8 @@ import ai.ninerouter.core.HostedKinds
 import ai.ninerouter.core.HostedService
 import ai.ninerouter.core.HostingPlanner
 import ai.ninerouter.core.HostingRuntime
+import ai.ninerouter.core.HostingStore
+import ai.ninerouter.core.HostStorage
 import android.content.Context
 import android.os.Build
 import kotlinx.coroutines.CoroutineScope
@@ -19,6 +23,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.File
+import java.io.InputStream
 import java.io.OutputStream
 import java.io.InputStreamReader
 import java.net.InetAddress
@@ -51,6 +56,8 @@ object HostingManager {
     private val lock = Any()
     private val running = mutableMapOf<String, Run>()
     private val stopping = mutableSetOf<String>()
+    /** Latest saved definition, so a crash restarts the active release. */
+    private val desired = mutableMapOf<String, HostedService>()
 
     private data class Run(
         val process: Process,
@@ -64,6 +71,11 @@ object HostingManager {
         service.username,
         service.password,
         service.autoStart.toString(),
+        service.entry,
+        service.publicDir,
+        service.active,
+        service.build,
+        service.env.entries.joinToString(",") { "${it.key}=${it.value}" },
     ).joinToString("|")
 
     fun searchDirs(context: Context): List<File> = buildList {
@@ -143,6 +155,16 @@ object HostingManager {
         }
 
     fun isRunning(id: String): Boolean = synchronized(lock) { running.containsKey(id) }
+
+    /** Layout for [service]; content points at the active deployment. */
+    fun layout(context: Context, service: HostedService): HostLayout {
+        val base = layout(context, service.id)
+        val release = service.releases.firstOrNull { it.id == service.active } ?: return base
+        val dir = File(base.releases, release.id)
+        val sub = service.publicDir.trim('/')
+        val content = if (sub.isBlank()) dir else File(dir, sub)
+        return base.copy(content = content)
+    }
 
     fun layout(context: Context, id: String): HostLayout {
         val root = File(File(context.filesDir, "hosting"), id)
@@ -291,7 +313,7 @@ object HostingManager {
                 )
             }
             try {
-                val layout = layout(app, service.id)
+                val layout = layout(app, service)
                 ensureRuntimeAssets(app, spec, layout)
                 val bins = resolve(app, spec)
                 if (bins.isEmpty()) {
@@ -325,12 +347,15 @@ object HostingManager {
                     file.parentFile?.mkdirs()
                     file.writeText(content)
                 }
-                plan.scaffold.forEach { (file, content) ->
-                    if (!file.exists()) {
-                        file.parentFile?.mkdirs()
-                        file.writeText(content)
+                if (service.active.isBlank()) {
+                    plan.scaffold.forEach { (file, content) ->
+                        if (!file.exists()) {
+                            file.parentFile?.mkdirs()
+                            file.writeText(content)
+                        }
                     }
                 }
+                synchronized(lock) { desired[service.id] = service }
                 for (step in plan.setup) {
                     val skip = step.skipIfExists
                     if (skip != null && skip.exists()) continue
@@ -482,7 +507,7 @@ object HostingManager {
             }
             return
         }
-        start(context, service)
+        start(context, synchronized(lock) { desired[service.id] } ?: service)
     }
 
     private suspend fun pumpLogs(id: String, process: Process) {
@@ -623,7 +648,169 @@ object HostingManager {
             running.remove(id)
             stopping.remove(id)
         }
+        synchronized(lock) { desired.remove(id) }
         HostingRuntime.clear(id)
+    }
+
+    /**
+     * Turn a ZIP upload into a new immutable release, run the optional build
+     * command, activate it and restart the service when it was running.
+     */
+    suspend fun deploy(
+        context: Context,
+        service: HostedService,
+        zip: InputStream,
+    ): HostedService = withContext(Dispatchers.IO) {
+        val app = context.applicationContext
+        val spec = HostedKinds.byId(service.kind)
+            ?: throw IllegalStateException("Unknown runtime '${service.kind}'.")
+        if (spec.id !in setOf("php", "node", "python")) {
+            throw IllegalStateException("${spec.label} cannot take a deployment; use a web runtime.")
+        }
+        val base = layout(app, service.id)
+        val releases = base.releases.apply { mkdirs() }
+        val stamp = System.currentTimeMillis()
+        val id = stamp.toString()
+        val stage = File(releases, ".stage-$id").apply {
+            deleteRecursively()
+            mkdirs()
+        }
+        HostingRuntime.update(service.id) { it.copy(message = "Deploying release $id…") }
+        log(service.id, "Deploying release $id…")
+        try {
+            HostDeploy.extract(zip, stage)
+            HostDeploy.flatten(stage)
+            if (service.build.isNotBlank()) runBuild(app, service, base, stage)
+            val detected = HostDeploy.detect(stage, spec.id)
+            if (service.entry.isNotBlank() && !File(stage, service.entry).isFile) {
+                throw IllegalStateException("Entrypoint '${service.entry}' is not in this archive.")
+            }
+            val final = File(releases, id)
+            if (!stage.renameTo(final)) {
+                stage.copyRecursively(final, overwrite = true)
+                stage.deleteRecursively()
+            }
+            val release = HostRelease(id, stamp, HostStorage.usage(final))
+            val kept = (listOf(release) + service.releases.filterNot { it.id == id })
+                .take(HostingStore.MAX_RELEASES)
+            val updated = service.copy(
+                releases = kept,
+                active = id,
+                publicDir = detected.publicDir,
+                entry = service.entry.ifBlank { detected.entry },
+            )
+            val keep = kept.map { it.id }.toSet()
+            releases.listFiles()
+                ?.filter { it.isDirectory && it.name != ".stage-$id" && it.name !in keep }
+                ?.forEach { old -> runCatching { old.deleteRecursively() } }
+            synchronized(lock) { desired[service.id] = updated }
+            restartIfRunning(app, updated, startIfAuto = true)
+            HostingRuntime.update(service.id) {
+                it.copy(restarts = 0, message = "Release ${updated.active} deployed.")
+            }
+            log(service.id, "Release $id deployed.")
+            updated
+        } catch (t: Throwable) {
+            runCatching { stage.deleteRecursively() }
+            fail(service, "Deploy failed: ${t.message ?: t.javaClass.simpleName}")
+            // The previous release kept serving; do not leave it as ERROR.
+            if (synchronized(lock) { running.containsKey(service.id) }) {
+                HostingRuntime.update(service.id) { it.copy(status = HostStatus.RUNNING) }
+            }
+            throw t
+        }
+    }
+
+    /** Point the service at another release and restart it if it was up. */
+    suspend fun activate(
+        context: Context,
+        service: HostedService,
+        releaseId: String,
+    ): HostedService {
+        if (service.releases.none { it.id == releaseId }) {
+            throw IllegalStateException("That release is no longer on disk.")
+        }
+        val updated = service.copy(active = releaseId)
+        synchronized(lock) { desired[service.id] = updated }
+        restartIfRunning(context.applicationContext, updated)
+        return updated
+    }
+
+    /** Remove a release that is not serving; the active one is kept. */
+    fun deleteRelease(
+        context: Context,
+        service: HostedService,
+        releaseId: String,
+    ): HostedService {
+        if (service.active == releaseId) {
+            throw IllegalStateException("Activate another release before deleting this one.")
+        }
+        File(layout(context, service.id).releases, releaseId).deleteRecursively()
+        return service.copy(releases = service.releases.filterNot { it.id == releaseId })
+    }
+
+    private suspend fun restartIfRunning(
+        context: Context,
+        service: HostedService,
+        startIfAuto: Boolean = false,
+    ) {
+        val running = synchronized(lock) { running.containsKey(service.id) }
+        if (running) {
+            stop(service.id)
+            start(context, service)
+        } else if (startIfAuto && service.autoStart) {
+            // Auto-start services should serve the new release right away.
+            start(context, service)
+        }
+    }
+
+    /** Run the optional build command inside the staged release. */
+    private suspend fun runBuild(
+        context: Context,
+        service: HostedService,
+        layout: HostLayout,
+        dir: File,
+    ) {
+        log(service.id, "Build: ${service.build}")
+        val builder = ProcessBuilder("/system/bin/sh", "-c", service.build)
+            .directory(dir)
+            .redirectErrorStream(true)
+        builder.environment().putAll(buildEnv(context, layout, service))
+        val process = try {
+            builder.start()
+        } catch (t: Throwable) {
+            throw IllegalStateException("Could not run the build: ${t.message ?: t.javaClass.simpleName}")
+        }
+        val pump = scope.launch { pumpLogs(service.id, process) }
+        val code = runCatching {
+            if (process.waitFor(10, TimeUnit.MINUTES)) process.exitValue() else {
+                process.destroyForcibly()
+                -1
+            }
+        }.getOrDefault(-1)
+        pump.join()
+        if (code != 0) {
+            throw IllegalStateException("Build command exited with code $code.")
+        }
+    }
+
+    private fun buildEnv(
+        context: Context,
+        layout: HostLayout,
+        service: HostedService,
+    ): Map<String, String> {
+        val dirs = searchDirs(context)
+        val env = linkedMapOf(
+            "HOME" to layout.home.absolutePath,
+            "TMPDIR" to layout.temp.absolutePath,
+            "PATH" to (dirs.map { it.absolutePath } + "/system/bin:/vendor/bin").joinToString(":"),
+            "LANG" to "C.UTF-8",
+        )
+        if (dirs.isNotEmpty()) {
+            env["LD_LIBRARY_PATH"] = dirs.joinToString(":") { it.absolutePath }
+        }
+        env.putAll(service.env)
+        return env
     }
 
     /**

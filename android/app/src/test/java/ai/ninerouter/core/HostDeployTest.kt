@@ -89,6 +89,17 @@ class HostDeployTest {
     }
 
     @Test
+    fun `keeps a valid entry and replaces a stale one`() {
+        val root = dir()
+        File(root, "index.js").writeText("1")
+        assertEquals("index.js", HostDeploy.entryFor(root, "node", ""))
+        assertEquals("index.js", HostDeploy.entryFor(root, "node", "missing.js"))
+
+        File(root, "server.js").writeText("1")
+        assertEquals("server.js", HostDeploy.entryFor(root, "node", "server.js"))
+    }
+
+    @Test
     fun `detects app py for python`() {
         val root = dir()
         assertEquals("", HostDeploy.detect(root, "python").entry)

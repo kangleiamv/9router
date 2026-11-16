@@ -161,6 +161,7 @@ object HostingManager {
         val base = layout(context, service.id)
         val release = service.releases.firstOrNull { it.id == service.active } ?: return base
         val dir = File(base.releases, release.id)
+        if (!dir.isDirectory) return base
         val sub = service.publicDir.trim('/')
         val content = if (sub.isBlank()) dir else File(dir, sub)
         return base.copy(content = content)
@@ -682,9 +683,6 @@ object HostingManager {
             HostDeploy.flatten(stage)
             if (service.build.isNotBlank()) runBuild(app, service, base, stage)
             val detected = HostDeploy.detect(stage, spec.id)
-            if (service.entry.isNotBlank() && !File(stage, service.entry).isFile) {
-                throw IllegalStateException("Entrypoint '${service.entry}' is not in this archive.")
-            }
             val final = File(releases, id)
             if (!stage.renameTo(final)) {
                 stage.copyRecursively(final, overwrite = true)
@@ -697,7 +695,7 @@ object HostingManager {
                 releases = kept,
                 active = id,
                 publicDir = detected.publicDir,
-                entry = service.entry.ifBlank { detected.entry },
+                entry = HostDeploy.entryFor(stage, spec.id, service.entry),
             )
             val keep = kept.map { it.id }.toSet()
             releases.listFiles()

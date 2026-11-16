@@ -129,6 +129,16 @@ object HostDeploy {
         else -> HostAppLayout("", "")
     }
 
+    /**
+     * Keep the configured entry when it exists in the new archive; otherwise
+     * use what this deployment looks like, so replacing a project does not
+     * fail on a stale entry from the previous one.
+     */
+    fun entryFor(dir: File, kind: String, preferred: String): String {
+        val detected = detect(dir, kind).entry
+        return preferred.takeIf { it.isNotBlank() && File(dir, it).isFile } ?: detected
+    }
+
     private fun nodeEntry(dir: File): String {
         listOf(
             "server.js", "index.js", "app.js", "main.js", "src/server.js", "src/index.js",

@@ -278,7 +278,10 @@ object HostingStore {
             if (env.size > MAX_ENV_VARS) {
                 throw IllegalArgumentException("At most $MAX_ENV_VARS environment variables are supported.")
             }
-            val releases = service.releases.distinctBy { it.id }.take(MAX_RELEASES)
+            val releases = service.releases
+                .distinctBy { it.id }
+                .filter { it.id.matches(Regex("[0-9]{1,20}")) }
+                .take(MAX_RELEASES)
             service.copy(
                 name = name,
                 entry = entry,

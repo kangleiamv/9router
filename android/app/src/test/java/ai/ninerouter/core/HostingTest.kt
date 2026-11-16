@@ -72,6 +72,11 @@ class HostingTest {
             listOf(active.copy(active = "missing")),
         ).single()
         assertEquals("", stale.active)
+
+        val unsafe = HostingStore.require(
+            listOf(active.copy(releases = listOf(release, HostRelease("../escape", 2L, 1L)))),
+        ).single()
+        assertEquals(listOf("1000"), unsafe.releases.map { it.id })
     }
 
     @Test

@@ -248,6 +248,35 @@ object HostingStore {
     }
 
     /**
+     * Recover release folders that were renamed into place but never reached
+     * settings, for example when Android killed the app between the deploy
+     * finishing and the database write. Without this the site falls back to
+     * the starter even though its files are still on disk.
+     */
+    fun recoverReleases(
+        releases: List<HostRelease>,
+        active: String,
+        folders: List<File>,
+    ): Pair<List<HostRelease>, String> {
+        val onDisk = folders
+            .filter { it.isDirectory && it.name.matches(Regex("[0-9]{1,20}")) }
+            .sortedByDescending { it.name.toLongOrNull() ?: 0L }
+        if (onDisk.isEmpty()) return releases to active
+        val known = releases.associateBy { it.id }
+        val recovered = onDisk.map { dir ->
+            known[dir.name] ?: HostRelease(dir.name, dir.lastModified(), HostStorage.usage(dir))
+        }
+        val merged = (releases + recovered)
+            .distinctBy { it.id }
+            .sortedByDescending { it.id.toLongOrNull() ?: 0L }
+            .take(MAX_RELEASES)
+        val ids = onDisk.map { it.name }.toSet()
+        val chosen = active.takeIf { it in ids }
+            ?: onDisk.firstOrNull()?.name.orEmpty()
+        return merged to chosen
+    }
+
+    /**
      * Validate and normalize service definitions. [blockedPorts] holds ports the
      * gateway, public listener, FTP host and passive range already use.
      */

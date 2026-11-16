@@ -70,10 +70,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.24>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.25>.
 
 ```bash
-adb install -r 9router-android-1.3.24-debug.apk
+adb install -r 9router-android-1.3.25-debug.apk
 ```
 
 The APK is about 98 MB because it carries the arm64 hosting runtimes. It builds
@@ -591,6 +591,21 @@ contains a built `index.html` first.
 If a saved entrypoint is missing from a release (for example after upgrading
 from a build that guessed `server.js`), the app re-detects the entrypoint at
 startup instead of crash-looping.
+
+A deploy can also be interrupted after its release folder is complete but
+before the settings row is written. On the next app launch, and when the
+foreground service applies hosting settings, numeric folders under
+`files/hosting/<id>/releases` are adopted, their size is recorded and the
+newest one is activated. This repairs a site whose folder exists while
+`releases`/`active` are empty, so **Files** opens the deployed project rather
+than the starter. If a Node process exits before opening its port, the card
+shows the exit code instead of remaining on `Starting`.
+
+Node runs with the bundled npm; the app also creates `hosted/bin/sh` and
+`hosted/bin/bash` links to `/system/bin/sh`. Android's UID database reports a
+login shell in that app-owned folder, and without the links any package script
+or CLI that spawns a shell (npm lifecycle hooks, Next.js, Vite plugins) fails
+with `ENOENT`.
 
 **Environment** opens a one-`NAME=value`-per-line editor plus the build
 command, and for Node.js shows the bundled npm version with **Install

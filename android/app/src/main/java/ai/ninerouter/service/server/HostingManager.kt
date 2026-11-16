@@ -1,6 +1,7 @@
 package ai.ninerouter.service.server
 
 import ai.ninerouter.core.ExecPolicy
+import ai.ninerouter.core.HostAppLayout
 import ai.ninerouter.core.HostBootstrap
 import ai.ninerouter.core.HostDeploy
 import ai.ninerouter.core.HostLayout
@@ -18,6 +19,7 @@ import ai.ninerouter.core.NpmRuntime
 import android.content.Context
 import android.net.Uri
 import android.os.Build
+import android.system.Os
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -190,6 +192,38 @@ object HostingManager {
     }
 
     /**
+     * Repair metadata for a deploy that finished on disk but was interrupted
+     * before its release was saved. Recovery prefers the newest folder on
+     * disk and re-detects the entry/document root when the saved values were
+     * lost with the metadata.
+     */
+    fun recoverReleases(context: Context, service: HostedService): HostedService {
+        if (service.kind !in setOf("static", "php", "node", "python")) return service
+        val base = layout(context, service.id)
+        val folders = base.releases.listFiles().orEmpty().toList()
+        val (releases, active) = HostingStore.recoverReleases(
+            service.releases,
+            service.active,
+            folders,
+        )
+        if (releases == service.releases && active == service.active) return service
+        val dir = File(base.releases, active)
+        val detected = if (dir.isDirectory) {
+            HostDeploy.detect(dir, service.kind)
+        } else {
+            HostAppLayout("", "")
+        }
+        val entry = service.entry.takeIf { it.isNotBlank() }
+            ?: detected.entry.takeIf { it.isNotBlank() && File(dir, it).isFile }.orEmpty()
+        return service.copy(
+            releases = releases,
+            active = active,
+            entry = entry,
+            publicDir = service.publicDir.ifBlank { detected.publicDir },
+        )
+    }
+
+    /**
      * PostgreSQL is compiled with `/data/data/<package>/hosted` as its prefix,
      * so its share, extension and temporary files must live exactly there.
      * The app owns its data directory root, so creating the sibling folder is
@@ -228,6 +262,23 @@ object HostingManager {
         marker.parentFile?.mkdirs()
         marker.writeText(RUNTIME_ASSETS + "-" + spec.id)
         ensureRuntimeDirs(spec, layout)
+    }
+
+    /**
+     * Node asks Android for the UID's login shell, which resolves to
+     * `hosted/bin/bash` for this app. Nothing creates that path, so every
+     * `child_process` call that uses a shell (npm lifecycle scripts, Next's
+     * CLI probes) fails with ENOENT. Point it at the platform shell once.
+     */
+    private fun ensureRuntimeShell(context: Context) {
+        val bin = File(runtimeRoot(context), "bin")
+        bin.mkdirs()
+        listOf("sh", "bash").forEach { name ->
+            val link = File(bin, name)
+            if (!link.exists()) {
+                runCatching { Os.symlink("/system/bin/sh", link.absolutePath) }
+            }
+        }
     }
 
     private fun ensureRuntimeDirs(spec: HostedKind, layout: HostLayout) {
@@ -327,6 +378,7 @@ object HostingManager {
             try {
                 val layout = layout(app, service)
                 ensureRuntimeAssets(app, spec, layout)
+                if (spec.id == "node") ensureRuntimeShell(app)
                 // A deployment saved before entry detection was fixed can
                 // still point at a file that is not in its release. Repair it
                 // from the release contents instead of crash-looping Node.
@@ -496,7 +548,25 @@ object HostingManager {
     private suspend fun awaitReady(id: String, port: Int, process: Process) {
         val deadline = System.currentTimeMillis() + READY_TIMEOUT_MS
         while (System.currentTimeMillis() < deadline) {
-            if (!process.isAlive) return
+            if (!process.isAlive) {
+                // watch() normally reports the exit and restarts. If it has
+                // not updated the card yet, do not leave "Starting" forever.
+                val code = runCatching { process.exitValue() }.getOrDefault(-1)
+                HostingRuntime.update(id) { state ->
+                    if (state.status == HostStatus.STARTING &&
+                        state.message.startsWith("Waiting for")
+                    ) {
+                        state.copy(
+                            status = HostStatus.ERROR,
+                            pid = 0,
+                            message = "Exited with code $code before opening its port. Check the log.",
+                        )
+                    } else {
+                        state
+                    }
+                }
+                return
+            }
             val actual = synchronized(lock) { detectedPorts[id] } ?: port
             if (portOpen(actual)) {
                 HostingRuntime.update(id) {
@@ -1105,17 +1175,22 @@ object HostingManager {
      * services, start the ones marked auto-start, leave manual ones alone.
      */
     suspend fun apply(context: Context, services: List<HostedService>) {
+        // Pick up a release that reached disk before the app died, even when
+        // the foreground service starts before the settings screen is open.
+        val recovered = withContext(Dispatchers.IO) {
+            services.map { recoverReleases(context.applicationContext, it) }
+        }
         val current = synchronized(lock) { running.mapValues { it.value.signature } }
-        val byId = services.associateBy { it.id }
+        val byId = recovered.associateBy { it.id }
         val toStop = current.keys.filter { id ->
             byId[id]?.let { signature(it) != current[id] } ?: true
         }
         // Edited services restart with their new settings; removed ones stop.
         val toRestart = toStop.filter { byId.containsKey(it) }
         toStop.forEach { runCatching { stop(it) } }
-        val saved = services.map { it.id }.toSet()
+        val saved = recovered.map { it.id }.toSet()
         HostingRuntime.states.value.keys.filterNot { it in saved }.forEach { forget(it) }
-        (services.filter { it.autoStart } + toRestart.mapNotNull { byId[it] })
+        (recovered.filter { it.autoStart } + toRestart.mapNotNull { byId[it] })
             .distinctBy { it.id }
             .forEach { runCatching { start(context, it) } }
     }

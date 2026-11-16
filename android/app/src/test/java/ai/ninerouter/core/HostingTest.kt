@@ -81,6 +81,48 @@ class HostingTest {
     }
 
     @Test
+    fun `recovers a release folder that was never saved`() {
+        val root = Files.createTempDirectory("host-recover").toFile()
+        val older = File(root, "1794800000000").apply { mkdirs() }
+        val newest = File(root, "1794808249852").apply { mkdirs() }
+        File(newest, "server.js").writeText("console.log('release')")
+        File(older, "index.html").writeText("old")
+        val known = HostRelease(older.name, older.lastModified(), 99L)
+
+        val (releases, active) = HostingStore.recoverReleases(
+            listOf(known),
+            "",
+            listOf(older, newest, File(root, ".stage-123")),
+        )
+
+        assertEquals(newest.name, active)
+        assertEquals(listOf(newest.name, older.name), releases.map { it.id })
+        assertEquals(99L, releases.first { it.id == older.name }.bytes)
+        assertTrue(releases.first { it.id == newest.name }.bytes > 0L)
+    }
+
+    @Test
+    fun `keeps an active release and ignores a missing folder`() {
+        val root = Files.createTempDirectory("host-recover").toFile()
+        val older = File(root, "1000").apply { mkdirs() }
+        val newest = File(root, "2000").apply { mkdirs() }
+        val known = listOf(
+            HostRelease("1000", 1_000L, 1L),
+            HostRelease("2000", 2_000L, 1L),
+            HostRelease("3000", 3_000L, 1L),
+        )
+
+        val (releases, active) = HostingStore.recoverReleases(
+            known,
+            "3000",
+            listOf(older, newest),
+        )
+
+        assertEquals("2000", active)
+        assertEquals(listOf("3000", "2000", "1000"), releases.map { it.id })
+    }
+
+    @Test
     fun `planner applies environment variables to the process`() {
         val layout = layout()
         val plan = HostingPlanner.plan(

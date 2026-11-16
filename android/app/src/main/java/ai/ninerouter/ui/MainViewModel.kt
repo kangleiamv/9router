@@ -143,6 +143,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val deployGuard = Any()
     private val _deployingHosts = MutableStateFlow<Set<String>>(emptySet())
     val deployingHosts: StateFlow<Set<String>> = _deployingHosts.asStateFlow()
+    private val persistHostedLock = Mutex()
 
     /** Bumped whenever a live model catalog changes, so Compose re-reads specs. */
     private val _catalogVersion = MutableStateFlow(0)
@@ -215,7 +216,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     init {
         viewModelScope.launch {
             runCatching { repo.seed() }
+            recoverHostedReleases()
             refreshSettings()
+        }
+    }
+
+    /**
+     * A deploy can be killed after its release folder is complete but before
+     * the settings row is written. Adopt those folders on the next launch so
+     * Files and the runtime use the release instead of the starter.
+     */
+    private suspend fun recoverHostedReleases() = persistHostedLock.withLock {
+        val current = HostingStore.decode(repo.getSetting(HostingStore.SETTINGS_KEY))
+        if (current.isEmpty()) return@withLock
+        val next = withContext(Dispatchers.IO) {
+            current.map { HostingManager.recoverReleases(getApplication(), it) }
+        }
+        if (next == current) return@withLock
+        repo.putSetting(HostingStore.SETTINGS_KEY, HostingStore.encode(next))
+        if (ProxyRuntime.running.value) {
+            ProxyForegroundService.syncHosting(getApplication())
         }
     }
 
@@ -436,8 +456,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }.onFailure { emit(it.message ?: "Could not update the service", true) }
         }
     }
-
-    private val persistHostedLock = Mutex()
 
     /**
      * Replace one saved service and refresh the settings flow. The whole

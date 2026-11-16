@@ -893,7 +893,7 @@ private fun LinkUrlBlock(
     }
 }
 @Composable
-private fun LinkEditorDialog(
+internal fun LinkEditorDialog(
     initial: TunnelLink?,
     blockedPorts: Set<Int>,
     ftpHostPort: Int,

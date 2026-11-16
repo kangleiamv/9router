@@ -3,6 +3,7 @@ package ai.ninerouter.core
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -136,6 +137,9 @@ class HostingTest {
         assertEquals("127.0.0.1", plan.env["HOST"])
         assertEquals(layout.content.absolutePath, plan.env["DOCROOT"])
         assertEquals("server.js", plan.scaffold.keys.single().name)
+        val agent = File(layout.home, "9router-port.js")
+        assertTrue(plan.env["NODE_OPTIONS"]!!.contains("--require ${agent.absolutePath}"))
+        assertEquals(agent, plan.files.keys.single { it.name == "9router-port.js" })
     }
 
     @Test
@@ -149,15 +153,25 @@ class HostingTest {
         val plan = HostingPlanner.plan(deployed, layout, binaries("node"))
         val starter = File(layout.home, "9router-static-server.js")
         assertEquals(listOf(starter.absolutePath), plan.args)
-        assertEquals(starter, plan.files.keys.single())
+        assertEquals(starter, plan.files.keys.single { it.name == "9router-static-server.js" })
+        assertEquals(2, plan.files.size)
         assertTrue(plan.scaffold.isEmpty())
         assertEquals(layout.content.absolutePath, plan.env["DOCROOT"])
 
         File(layout.content, "server.js").writeText("console.log('own app')")
         val own = HostingPlanner.plan(deployed, layout, binaries("node"))
         assertEquals(listOf("server.js"), own.args)
-        assertTrue(own.files.isEmpty())
+        assertFalse(own.files.keys.any { it.name == "9router-static-server.js" })
+        assertTrue(own.files.keys.any { it.name == "9router-port.js" })
         assertTrue(own.scaffold.isEmpty())
+    }
+
+    @Test
+    fun `node port markers are parsed and other lines are ignored`() {
+        assertEquals(3456, HostingPlanner.portFromLog("__9ROUTER_PORT__=3456"))
+        assertNull(HostingPlanner.portFromLog("listening on 3456"))
+        assertNull(HostingPlanner.portFromLog("__9ROUTER_PORT__=0"))
+        assertNull(HostingPlanner.portFromLog("__9ROUTER_PORT__=abc"))
     }
 
     @Test

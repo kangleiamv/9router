@@ -229,7 +229,10 @@ internal fun HostingCard(
                 onStart = { onStart(service.id) },
                 onStop = { onStop(service.id) },
                 onAutoStart = { onAutoStart(service.id, it) },
-                onPublish = { onPublish(service) },
+                onPublish = {
+                    val port = state.port.takeIf { it in 1..65535 } ?: service.port
+                    onPublish(service.copy(port = port))
+                },
                 onFiles = { filesFor = service.id },
                 onDeploy = {
                     deployTarget = service.id
@@ -359,6 +362,7 @@ private fun ServiceRow(
         HostStatus.ERROR -> Rose
         HostStatus.STOPPED -> TextMuted
     }
+    val actualPort = state.port.takeIf { it in 1..65535 } ?: service.port
     val statusText = when (state.status) {
         HostStatus.RUNNING -> "Running"
         HostStatus.STARTING -> "Starting"
@@ -378,7 +382,7 @@ private fun ServiceRow(
             Column(Modifier.weight(1f)) {
                 Text(service.name, style = MaterialTheme.typography.titleSmall, color = TextPrimary)
                 Text(
-                    "${spec.label} · 127.0.0.1:${service.port}" +
+                    "${spec.label} · 127.0.0.1:$actualPort" +
                         if (service.entry.isNotBlank()) " · ${service.entry}" else "",
                     style = MaterialTheme.typography.bodySmall,
                     color = TextMuted,
@@ -411,7 +415,7 @@ private fun ServiceRow(
         if (state.status == HostStatus.RUNNING && spec.web) {
             Spacer(Modifier.height(4.dp))
             Text(
-                "http://127.0.0.1:${service.port}/",
+                "http://127.0.0.1:$actualPort/",
                 style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
                 color = TextSecondary,
             )
@@ -634,10 +638,11 @@ private fun HostingEditorDialog(
                     label = "Loopback port",
                     placeholder = kind.port.toString(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    supportingText = if (port.toIntOrNull() in blockedPorts) {
-                        "Port $port is used by 9Router."
-                    } else {
-                        "Must be free on 127.0.0.1."
+                    supportingText = when {
+                        port.toIntOrNull() in blockedPorts -> "Port $port is used by 9Router."
+                        kind.id == "node" ->
+                            "Passed as PORT; the app's real listening port is detected."
+                        else -> "Must be free on 127.0.0.1."
                     },
                 )
                 if (kind.id == "node" || kind.id == "python") {

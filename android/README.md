@@ -32,7 +32,8 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 - **Usage** — animated 7-day/hourly charts, provider and status breakdowns, and a dedicated Overview / Request log switcher with a day-grouped, filterable request feed
 - **Quota Tracker** — live provider limits (Antigravity, Gemini CLI, Claude, DeepSeek, Groq, GLM, OpenCode, Vercel AI Gateway, Ollama Cloud, MiniMax), animated gauges, reset countdowns, local usage fallback, and cooldown/model-lock tracking
 - **Telegram Bot** — bot token, owner chat id, routing, notifications, commands
-- **Cloudflare Tunnel** — quick or named tunnel, public URL with copy/open/retry, connector state and live log tail, an optional FTP host serving device storage, a hosting card that starts PHP/Node.js/Python/Redis/PostgreSQL/MySQL on loopback, and local links where every link chooses a dedicated Quick tunnel or the shared Named tunnel; the editor fills service presets and detects listening loopback ports
+- **Hosting** — dedicated page in the drawer for the hosting surface only: start PHP/Node.js/Python/Redis/PostgreSQL/MySQL on loopback, deploy ZIPs or device folders as immutable releases, activate/rollback, edit environment variables and build commands, browse files, publish a service to a local link, and read per-service logs
+- **Cloudflare Tunnel** — quick or named tunnel, public URL with copy/open/retry, connector state and live log tail, an optional FTP host serving device storage, and local links where every link chooses a dedicated Quick tunnel or the shared Named tunnel; the editor fills service presets and detects listening loopback ports
 - **Console Log** — live day-grouped request inspector with status filters, collapsible search, expandable request/response payloads and one-tap copy
 - **Settings** — port, auto-start, retention, storage, runtime info
 
@@ -68,10 +69,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.18>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.19>.
 
 ```bash
-adb install -r 9router-android-1.3.18-debug.apk
+adb install -r 9router-android-1.3.19-debug.apk
 ```
 
 The APK is about 98 MB because it carries the arm64 hosting runtimes. It builds
@@ -407,6 +408,11 @@ folder used before the first deploy, `data` for database files, and `home`,
   root URL. Set an entrypoint to run your own file. A deployed release with no
   Node entry file is served statically by the built-in server, so a plain
   `index.html` folder works without writing any server code.
+  The app preloads a small agent (`node --require`) that hooks
+  `net.Server.listen`, so the port your app actually binds is detected even when
+  it ignores `PORT` or calls `listen(0)`. Detection covers plain `http`, Express
+  and anything else built on `net`, and the row, readiness probe and Publish
+  button all use the detected port while the saved port stays the `PORT` value.
 - **Python** — `python3 -m http.server <port> --bind 127.0.0.1 --directory
   <public>`, or your own entrypoint such as `app.py`.
 - **Redis** — AOF persistence in `data`, loopback bind and a generated
@@ -418,6 +424,10 @@ folder used before the first deploy, `data` for database files, and `home`,
   `mariadbd --bootstrap` once, then `mariadbd` binds `127.0.0.1` with an `app`
   database and a generated user and password. A folder left behind by a failed
   bootstrap is cleared so the next start can initialize cleanly.
+
+The **Hosting** page in the navigation drawer shows this surface on its own,
+without the tunnel, FTP and local-link panels. Both views read the same stored
+services and runtime state.
 
 Each service row also shows its **storage**: the size of its code, database and
 log folders plus the free space left on the device, and a **Files** button that

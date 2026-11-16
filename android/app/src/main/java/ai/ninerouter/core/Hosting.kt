@@ -466,6 +466,12 @@ object HostingPlanner {
                 val staticFallback =
                     service.active.isNotBlank() && !File(layout.content, entry).isFile
                 val starter = File(layout.home, "9router-static-server.js")
+                // Hook net.Server.listen so the app's real port is known even
+                // when it ignores PORT or calls listen(0).
+                val portAgent = File(layout.home, "9router-port.js")
+                val nodeOptions = env["NODE_OPTIONS"].orEmpty().trim()
+                env["NODE_OPTIONS"] = (if (nodeOptions.isEmpty()) "" else "$nodeOptions ") +
+                    "--require ${portAgent.absolutePath}"
                 env["PORT"] = service.port.toString()
                 env["HOST"] = "127.0.0.1"
                 env["DOCROOT"] = layout.content.absolutePath
@@ -475,7 +481,10 @@ object HostingPlanner {
                     args = listOf(if (staticFallback) starter.absolutePath else entry),
                     env = env,
                     workDir = layout.content,
-                    files = if (staticFallback) mapOf(starter to NODE_SERVER) else emptyMap(),
+                    files = buildMap {
+                        if (staticFallback) put(starter, NODE_SERVER)
+                        put(portAgent, NODE_PORT_AGENT)
+                    },
                     scaffold = if (
                         !staticFallback && service.active.isBlank() && entry == "server.js"
                     ) {
@@ -684,6 +693,39 @@ code{background:#f1f5f9;padding:.15rem .4rem;border-radius:.35rem}</style></head
 <body><h1>Python is running</h1>
 <p><code>python3 -m http.server</code> is serving this folder.</p>
 </body></html>
+"""
+
+    /** Machine-readable line the injected Node agent writes on listen. */
+    const val PORT_MARKER = "__9ROUTER_PORT__="
+
+    /** Port reported by [line], or null when it is not a port marker. */
+    fun portFromLog(line: String): Int? {
+        if (!line.startsWith(PORT_MARKER)) return null
+        return line.removePrefix(PORT_MARKER)
+            .trim()
+            .toIntOrNull()
+            ?.takeIf { it in 1..65535 }
+    }
+
+    /**
+     * Preloaded with `node --require` to report every listening server. Express
+     * and plain `http` both end up in `net.Server.listen`, so this also catches
+     * apps that hardcode a port or call `listen(0)`.
+     */
+    private const val NODE_PORT_AGENT = """// 9Router: report the port this Node server listens on.
+const net = require('net');
+const listen = net.Server.prototype.listen;
+net.Server.prototype.listen = function (...args) {
+  this.once('listening', () => {
+    try {
+      const address = this.address();
+      if (address && typeof address === 'object' && address.port) {
+        process.stdout.write('$PORT_MARKER' + address.port + '\n');
+      }
+    } catch (err) {}
+  });
+  return listen.apply(this, args);
+};
 """
 
     private const val NODE_SERVER = """// Created by 9Router. Replace this file with your own app.

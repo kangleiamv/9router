@@ -59,6 +59,8 @@ object HostingManager {
     private val stopping = mutableSetOf<String>()
     /** Latest saved definition, so a crash restarts the active release. */
     private val desired = mutableMapOf<String, HostedService>()
+    /** Port a Node process reported on its own, used instead of the guess. */
+    private val detectedPorts = mutableMapOf<String, Int>()
 
     private data class Run(
         val process: Process,
@@ -303,6 +305,7 @@ object HostingManager {
         synchronized(lock) {
             if (running.containsKey(service.id)) return
             stopping.remove(service.id)
+            detectedPorts.remove(service.id)
         }
         val app = context.applicationContext
         withContext(Dispatchers.IO) {
@@ -458,7 +461,9 @@ object HostingManager {
                         message = "Waiting for 127.0.0.1:${service.port}…",
                     )
                 }
-                scope.launch { pumpLogs(service.id, process) }
+                scope.launch {
+                    pumpLogs(service.id, process, detectPort = spec.id == "node")
+                }
                 scope.launch { awaitReady(service.id, effective.port, process) }
                 scope.launch { watch(app, effective, process) }
             } catch (t: Throwable) {
@@ -471,10 +476,12 @@ object HostingManager {
         val deadline = System.currentTimeMillis() + READY_TIMEOUT_MS
         while (System.currentTimeMillis() < deadline) {
             if (!process.isAlive) return
-            if (portOpen(port)) {
+            val actual = synchronized(lock) { detectedPorts[id] } ?: port
+            if (portOpen(actual)) {
                 HostingRuntime.update(id) {
                     it.copy(
                         status = HostStatus.RUNNING,
+                        port = actual,
                         message = "",
                         restarts = 0,
                     )
@@ -484,10 +491,28 @@ object HostingManager {
             delay(300)
         }
         if (process.isAlive) {
+            val actual = synchronized(lock) { detectedPorts[id] } ?: port
             HostingRuntime.update(id) {
-                it.copy(message = "Still starting on 127.0.0.1:$port…")
+                it.copy(message = "Still starting on 127.0.0.1:$actual…")
             }
         }
+    }
+
+    /** Store the port a Node process reported and refresh the UI state. */
+    private fun onPortDetected(id: String, port: Int) {
+        val fresh = synchronized(lock) {
+            if (id in stopping || detectedPorts.containsKey(id)) {
+                false
+            } else {
+                detectedPorts[id] = port
+                true
+            }
+        }
+        if (!fresh) return
+        HostingRuntime.update(id) {
+            it.copy(port = port, message = "Detected Node.js on 127.0.0.1:$port…")
+        }
+        log(id, "Detected Node.js listening port $port.")
     }
 
     private suspend fun watch(context: Context, service: HostedService, process: Process) {
@@ -534,12 +559,13 @@ object HostingManager {
         start(context, synchronized(lock) { desired[service.id] } ?: service)
     }
 
-    private suspend fun pumpLogs(id: String, process: Process) {
+    private suspend fun pumpLogs(id: String, process: Process, detectPort: Boolean = false) {
         runCatching {
             BufferedReader(InputStreamReader(process.inputStream, Charsets.UTF_8)).use { reader ->
                 while (true) {
                     val line = reader.readLine() ?: break
-                    log(id, line)
+                    val port = if (detectPort) HostingPlanner.portFromLog(line) else null
+                    if (port != null) onPortDetected(id, port) else log(id, line)
                 }
             }
         }
@@ -647,6 +673,7 @@ object HostingManager {
     suspend fun stop(id: String) = withContext(Dispatchers.IO) {
         val run = synchronized(lock) {
             stopping.add(id)
+            detectedPorts.remove(id)
             running.remove(id)
         }
         HostingRuntime.update(id) {
@@ -671,6 +698,7 @@ object HostingManager {
         synchronized(lock) {
             running.remove(id)
             stopping.remove(id)
+            detectedPorts.remove(id)
         }
         synchronized(lock) { desired.remove(id) }
         HostingRuntime.clear(id)
@@ -885,6 +913,7 @@ object HostingManager {
     fun stopAllNow() {
         val current = synchronized(lock) {
             stopping.addAll(running.keys)
+            detectedPorts.clear()
             running.values.toList().also { running.clear() }
         }
         current.forEach { run ->

@@ -126,6 +126,20 @@ class HostDeployTest {
     }
 
     @Test
+    fun `recognises the old generated node starter`() {
+        val root = dir()
+        val starter = File(root, "server.js")
+        starter.writeText(
+            "// Created by 9Router. Replace this file with your own app.\n" +
+                "const target = path.join(root, path.normalize(url));\n",
+        )
+        assertTrue(HostDeploy.isLegacyNodeStarter(starter))
+
+        starter.writeText("// My own app\nconsole.log('hi')\n")
+        assertFalse(HostDeploy.isLegacyNodeStarter(starter))
+    }
+
+    @Test
     fun `detects a public document root for php`() {
         val root = dir()
         File(root, "public").mkdirs()
@@ -142,6 +156,10 @@ class HostDeployTest {
         val pkg = dir()
         File(pkg, "package.json").writeText("""{"main":"src/boot.js"}""")
         assertEquals("src/boot.js", HostDeploy.detect(pkg, "node").entry)
+
+        val esm = dir()
+        File(esm, "index.mjs").writeText("1")
+        assertEquals("index.mjs", HostDeploy.detect(esm, "node").entry)
 
         val empty = dir()
         assertEquals("server.js", HostDeploy.detect(empty, "node").entry)

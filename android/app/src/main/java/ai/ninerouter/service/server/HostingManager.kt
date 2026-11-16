@@ -317,6 +317,25 @@ object HostingManager {
             try {
                 val layout = layout(app, service)
                 ensureRuntimeAssets(app, spec, layout)
+                // A deployment saved before entry detection was fixed can
+                // still point at a file that is not in its release. Repair it
+                // from the release contents instead of crash-looping Node.
+                val content = layout.content
+                val effective = if (
+                    service.active.isNotBlank() &&
+                    spec.id in setOf("node", "python") &&
+                    service.entry.isNotBlank() &&
+                    !File(content, service.entry).isFile
+                ) {
+                    val repaired = HostDeploy.entryFor(content, spec.id, "")
+                    log(
+                        service.id,
+                        "Entry '${service.entry}' is missing; using '$repaired'.",
+                    )
+                    service.copy(entry = repaired)
+                } else {
+                    service
+                }
                 val bins = resolve(app, spec)
                 if (bins.isEmpty()) {
                     throw IllegalStateException(
@@ -326,7 +345,7 @@ object HostingManager {
                     )
                 }
                 val plan = HostingPlanner.plan(
-                    service = service,
+                    service = effective,
                     layout = layout,
                     binaries = bins,
                     searchDirs = searchDirs(app),
@@ -351,13 +370,16 @@ object HostingManager {
                 }
                 if (service.active.isBlank()) {
                     plan.scaffold.forEach { (file, content) ->
-                        if (!file.exists()) {
+                        val staleStarter = spec.id == "node" &&
+                            file.isFile &&
+                            HostDeploy.isLegacyNodeStarter(file)
+                        if (!file.exists() || staleStarter) {
                             file.parentFile?.mkdirs()
                             file.writeText(content)
                         }
                     }
                 }
-                synchronized(lock) { desired[service.id] = service }
+                synchronized(lock) { desired[service.id] = effective }
                 for (step in plan.setup) {
                     val skip = step.skipIfExists
                     if (skip != null && skip.exists()) continue
@@ -426,7 +448,7 @@ object HostingManager {
                     )
                 }
                 synchronized(lock) {
-                    running[service.id] = Run(process, signature(service))
+                    running[service.id] = Run(process, signature(effective))
                     stopping.remove(service.id)
                 }
                 HostingRuntime.update(service.id) {
@@ -437,8 +459,8 @@ object HostingManager {
                     )
                 }
                 scope.launch { pumpLogs(service.id, process) }
-                scope.launch { awaitReady(service.id, service.port, process) }
-                scope.launch { watch(app, service, process) }
+                scope.launch { awaitReady(service.id, effective.port, process) }
+                scope.launch { watch(app, effective, process) }
             } catch (t: Throwable) {
                 fail(service, t.message ?: t.javaClass.simpleName)
             }

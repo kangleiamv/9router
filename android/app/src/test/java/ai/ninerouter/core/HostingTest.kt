@@ -139,6 +139,28 @@ class HostingTest {
     }
 
     @Test
+    fun `a deployed node release without an entry is served statically`() {
+        val layout = layout()
+        layout.content.mkdirs()
+        File(layout.content, "index.html").writeText("<h1>static</h1>")
+        val release = HostRelease("1000", 1L, 1L)
+        val deployed = service("node", 3101, entry = "server.js")
+            .copy(active = "1000", releases = listOf(release))
+        val plan = HostingPlanner.plan(deployed, layout, binaries("node"))
+        val starter = File(layout.home, "9router-static-server.js")
+        assertEquals(listOf(starter.absolutePath), plan.args)
+        assertEquals(starter, plan.files.keys.single())
+        assertTrue(plan.scaffold.isEmpty())
+        assertEquals(layout.content.absolutePath, plan.env["DOCROOT"])
+
+        File(layout.content, "server.js").writeText("console.log('own app')")
+        val own = HostingPlanner.plan(deployed, layout, binaries("node"))
+        assertEquals(listOf("server.js"), own.args)
+        assertTrue(own.files.isEmpty())
+        assertTrue(own.scaffold.isEmpty())
+    }
+
+    @Test
     fun `python supports http server and a custom entrypoint`() {
         val layout = layout()
         val http = HostingPlanner.plan(service("python", 8100), layout, binaries("python3"))

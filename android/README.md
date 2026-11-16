@@ -68,10 +68,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.17>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.18>.
 
 ```bash
-adb install -r 9router-android-1.3.17-debug.apk
+adb install -r 9router-android-1.3.18-debug.apk
 ```
 
 The APK is about 98 MB because it carries the arm64 hosting runtimes. It builds
@@ -403,7 +403,10 @@ folder used before the first deploy, `data` for database files, and `home`,
 - **PHP** — `php -S 127.0.0.1:<port> -t <public>` with four CLI-server workers
   and a starter `index.php`.
 - **Node.js** — `node server.js` with `PORT`, `HOST=127.0.0.1` and `DOCROOT`,
-  plus a small static `server.js`. Set an entrypoint to run your own file.
+  plus a small static `server.js` that serves `index.html` for folders and the
+  root URL. Set an entrypoint to run your own file. A deployed release with no
+  Node entry file is served statically by the built-in server, so a plain
+  `index.html` folder works without writing any server code.
 - **Python** — `python3 -m http.server <port> --bind 127.0.0.1 --directory
   <public>`, or your own entrypoint such as `app.py`.
 - **Redis** — AOF persistence in `data`, loopback bind and a generated
@@ -456,6 +459,12 @@ back to any of the last five.
 5. **Releases** lists the history with size and time. **Activate** promotes an
    older release (rollback); **Delete** removes a release that is not serving.
    The newest five are kept and older folders are pruned automatically.
+
+A Node.js release with no entry file is served statically with its
+`index.html`, so folder deployments of plain HTML sites need no server code.
+If a saved entrypoint is missing from a release (for example after upgrading
+from a build that guessed `server.js`), the app re-detects the entrypoint at
+startup instead of crash-looping.
 
 **Environment** opens a one-`NAME=value`-per-line editor plus the build
 command. Values are applied on top of the runtime defaults and survive

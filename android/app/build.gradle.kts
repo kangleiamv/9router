@@ -14,8 +14,8 @@ android {
         applicationId = "ai.ninerouter"
         minSdk = 26
         targetSdk = 34
-        versionCode = 22
-        versionName = "1.3.17"
+        versionCode = 23
+        versionName = "1.3.18"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }

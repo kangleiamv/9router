@@ -265,6 +265,16 @@ object HostDeploy {
     }
 
     /**
+     * The Node starter shipped before 1.3.18 returned 404 for `/` because it
+     * read directories instead of their `index.html`. Existing copies are
+     * safe to replace; only the generated file matches this test.
+     */
+    fun isLegacyNodeStarter(file: File): Boolean = runCatching {
+        val text = file.readText()
+        text.startsWith("// Created by 9Router.") && text.contains("path.normalize(url)")
+    }.getOrDefault(false)
+
+    /**
      * Keep the configured entry when it exists in the new archive; otherwise
      * use what this deployment looks like, so replacing a project does not
      * fail on a stale entry from the previous one.
@@ -276,7 +286,11 @@ object HostDeploy {
 
     private fun nodeEntry(dir: File): String {
         listOf(
-            "server.js", "index.js", "app.js", "main.js", "src/server.js", "src/index.js",
+            "server.js", "index.js", "app.js", "main.js",
+            "server.mjs", "index.mjs", "app.mjs", "main.mjs",
+            "server.cjs", "index.cjs",
+            "src/server.js", "src/index.js", "src/app.js",
+            "src/server.mjs", "src/index.mjs",
         ).firstOrNull { File(dir, it).isFile }?.let { return it }
         val main = runCatching {
             Json.parseToJsonElement(File(dir, "package.json").readText())

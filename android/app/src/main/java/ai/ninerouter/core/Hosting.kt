@@ -459,16 +459,30 @@ object HostingPlanner {
 
             "node" -> {
                 val entry = service.entry.ifBlank { "server.js" }
+                // A deployed release with no Node entry file is a static
+                // site. Serve it with the built-in server from `home` so the
+                // immutable release is never modified and switching releases
+                // does not carry a starter file between them.
+                val staticFallback =
+                    service.active.isNotBlank() && !File(layout.content, entry).isFile
+                val starter = File(layout.home, "9router-static-server.js")
                 env["PORT"] = service.port.toString()
                 env["HOST"] = "127.0.0.1"
                 env["DOCROOT"] = layout.content.absolutePath
                 env["NODE_ENV"] = "production"
                 HostingPlan(
                     program = bin(spec.binaries),
-                    args = listOf(entry),
+                    args = listOf(if (staticFallback) starter.absolutePath else entry),
                     env = env,
                     workDir = layout.content,
-                    scaffold = mapOf(File(layout.content, "server.js") to NODE_SERVER),
+                    files = if (staticFallback) mapOf(starter to NODE_SERVER) else emptyMap(),
+                    scaffold = if (
+                        !staticFallback && service.active.isBlank() && entry == "server.js"
+                    ) {
+                        mapOf(File(layout.content, "server.js") to NODE_SERVER)
+                    } else {
+                        emptyMap()
+                    },
                     webUrl = service.webUrl,
                 )
             }
@@ -679,33 +693,62 @@ const path = require('path');
 
 const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || '127.0.0.1';
-const root = process.env.DOCROOT || __dirname;
+const root = path.resolve(process.env.DOCROOT || __dirname);
 const types = {
   '.html': 'text/html; charset=utf-8',
+  '.htm': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
-  '.txt': 'text/plain; charset=utf-8'
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
+  '.txt': 'text/plain; charset=utf-8',
+  '.xml': 'application/xml; charset=utf-8',
+  '.pdf': 'application/pdf',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2'
 };
 
 http.createServer((req, res) => {
-  const url = decodeURIComponent((req.url || '/').split('?')[0]);
-  const target = path.join(root, path.normalize(url).replace(/^(\.\.[\/\\])+/, ''));
-  if (!target.startsWith(root)) {
-    res.writeHead(403).end('Forbidden');
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.writeHead(405, { 'content-type': 'text/plain; charset=utf-8', allow: 'GET, HEAD' });
+    res.end('Method not allowed');
     return;
   }
-  fs.readFile(target, (err, data) => {
-    if (err) {
-      res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
-      res.end('Not found');
-      return;
-    }
-    res.writeHead(200, { 'content-type': types[path.extname(target)] || 'application/octet-stream' });
-    res.end(data);
+  let pathname;
+  try {
+    pathname = decodeURIComponent((req.url || '/').split('?')[0]);
+  } catch (err) {
+    res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end('Bad request');
+    return;
+  }
+  let target = path.join(root, path.posix.normalize('/' + pathname));
+  if (target !== root && !target.startsWith(root + path.sep)) {
+    res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end('Forbidden');
+    return;
+  }
+  fs.stat(target, (statErr, stat) => {
+    if (!statErr && stat.isDirectory()) target = path.join(target, 'index.html');
+    fs.readFile(target, (err, data) => {
+      if (err) {
+        res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+        res.end('Not found');
+        return;
+      }
+      res.writeHead(200, {
+        'content-type': types[path.extname(target).toLowerCase()] || 'application/octet-stream',
+        'content-length': data.length
+      });
+      if (req.method === 'HEAD') res.end(); else res.end(data);
+    });
   });
 }).listen(port, host, () => {
   console.log('9Router Node host listening on http://' + host + ':' + port);

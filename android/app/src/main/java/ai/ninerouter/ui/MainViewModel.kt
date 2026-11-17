@@ -8,10 +8,20 @@ import ai.ninerouter.core.FtpHostSettings
 import ai.ninerouter.core.FtpHostState
 import ai.ninerouter.core.FtpHostStore
 import ai.ninerouter.core.HostServiceState
+import ai.ninerouter.core.HostStatus
 import ai.ninerouter.core.HostedKinds
 import ai.ninerouter.core.HostedService
+import ai.ninerouter.core.HostingAi
+import ai.ninerouter.core.HostingAiAgent
+import ai.ninerouter.core.HostingAiHost
+import ai.ninerouter.core.HostingAiSession
+import ai.ninerouter.core.HostingAiStatus
+import ai.ninerouter.core.HostingAiStep
+import ai.ninerouter.core.HostingAiTone
+import ai.ninerouter.core.HostingAiTools
 import ai.ninerouter.core.HostingRuntime
 import ai.ninerouter.core.HostingStore
+import ai.ninerouter.core.SecretMask
 import ai.ninerouter.core.LinkTunnelRuntime
 import ai.ninerouter.core.LocalServices
 import ai.ninerouter.core.SiteDatabases
@@ -45,7 +55,9 @@ import android.content.Intent
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -67,6 +79,10 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonPrimitive
+import java.io.File
+import java.io.Reader
+import java.net.HttpURLConnection
+import java.net.URL
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -105,6 +121,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val hostingStates: StateFlow<Map<String, HostServiceState>> = HostingRuntime.states
+
+    /** Live transcript of the hosting doctor, when a fix is running. */
+    private val _hostingAi = MutableStateFlow<HostingAiSession?>(null)
+    val hostingAi: StateFlow<HostingAiSession?> = _hostingAi.asStateFlow()
+    private var hostingAiJob: Job? = null
 
     private val _hostingAvailability = MutableStateFlow<Map<String, Boolean>>(emptyMap())
     val hostingAvailability: StateFlow<Map<String, Boolean>> = _hostingAvailability.asStateFlow()
@@ -441,6 +462,244 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             runCatching { HostingManager.stop(id) }
                 .onFailure { emit(it.message ?: "Could not stop the service", true) }
+        }
+    }
+
+    /**
+     * Diagnose and repair a site with the provider connection the user already
+     * configured. The agent only sees one active release, and the real hosting
+     * runtime performs restarts and health checks.
+     */
+    fun startHostingAiFix(id: String, requestedModel: String = "") {
+        val context = getApplication<Application>()
+        hostingAiJob?.cancel()
+        hostingAiJob = viewModelScope.launch {
+            val service = runCatching {
+                HostingStore.decode(repo.getSetting(HostingStore.SETTINGS_KEY))
+                    .firstOrNull { it.id == id }
+            }.getOrNull()
+            if (service == null) {
+                emit("That hosted service no longer exists", true)
+                return@launch
+            }
+            val route = requestedModel.trim().ifBlank { resolveHostingAiModel() }
+            val runTag = "hosting-ai-${System.nanoTime()}"
+            if (route.isBlank()) {
+                _hostingAi.value = HostingAiSession(
+                    runTag = runTag,
+                    serviceId = service.id,
+                    serviceName = service.name,
+                    model = "",
+                    status = HostingAiStatus.FAILED,
+                    summary = "No AI provider is configured. Add a provider in Providers or create a combo first.",
+                )
+                emit("Add a provider or combo before using Fix with AI", true)
+                return@launch
+            }
+            if (requestedModel.isNotBlank()) {
+                runCatching { repo.putSetting(HostingAi.MODEL_KEY, route) }
+                refreshSettings()
+            }
+
+            val base = HostingManager.layout(context, service.id)
+            val releaseRoot = if (service.active.isNotBlank()) {
+                File(base.releases, service.active).takeIf { it.isDirectory } ?: base.content
+            } else {
+                base.content
+            }
+            releaseRoot.mkdirs()
+            val backup = File(
+                base.root,
+                "ai-backups/${service.active.ifBlank { "legacy" }}/${System.currentTimeMillis()}",
+            )
+            val tools = HostingAiTools(releaseRoot, backup)
+            _hostingAi.value = HostingAiSession(
+                runTag = runTag,
+                serviceId = service.id,
+                serviceName = service.name,
+                model = route,
+                steps = listOf(
+                    HostingAiStep(
+                        HostingAiTone.INFO,
+                        "Using $route",
+                        "Reading the active release and recent output…",
+                    ),
+                ),
+            )
+
+            val host = object : HostingAiHost {
+                override fun state(): HostServiceState = HostingRuntime.state(service.id)
+
+                override fun logs(maxLines: Int): String {
+                    val state = HostingRuntime.state(service.id)
+                    return state.log.takeLast(maxLines).joinToString("\n")
+                        .ifBlank { "(no output yet)" }
+                }
+
+                override suspend fun restart(): String = restartHostedForAi(context, service)
+
+                override suspend fun checkHttp(path: String): String =
+                    checkHostedHttp(service, path)
+            }
+
+            try {
+                val run = HostingAiAgent(tools, host).run(
+                    service = service,
+                    model = route,
+                    chat = { messages, system ->
+                        repo.chatInternalReply(route, messages, system)
+                    },
+                    onStep = { step ->
+                        _hostingAi.update { current ->
+                            if (current?.runTag != runTag) current
+                            else current.copy(steps = (current.steps + step).takeLast(120))
+                        }
+                    },
+                )
+                _hostingAi.update { current ->
+                    if (current?.runTag != runTag) current
+                    else current.copy(
+                        status = if (run.ok) HostingAiStatus.DONE else HostingAiStatus.FAILED,
+                        summary = SecretMask.text(run.summary),
+                        changedFiles = run.changedFiles,
+                        backupDir = if (run.changedFiles.isEmpty()) "" else tools.backupPath(),
+                        siteRunning = run.siteRunning,
+                    )
+                }
+                if (run.ok) {
+                    refreshSettings()
+                    emit(
+                        service.name + ": AI fix finished" +
+                            if (run.changedFiles.isEmpty()) "" else
+                                " · ${run.changedFiles.size} file(s) changed",
+                    )
+                } else {
+                    emit("${service.name}: AI could not finish", true)
+                }
+            } catch (cancel: CancellationException) {
+                _hostingAi.update { current ->
+                    if (current?.runTag == runTag && current.status == HostingAiStatus.RUNNING) {
+                        current.copy(
+                            status = HostingAiStatus.CANCELLED,
+                            summary = "Stopped by the user.",
+                        )
+                    } else {
+                        current
+                    }
+                }
+                throw cancel
+            } catch (error: Throwable) {
+                val message = SecretMask.text(error.message ?: "AI fix failed")
+                _hostingAi.update { current ->
+                    if (current?.runTag != runTag) current
+                    else current.copy(status = HostingAiStatus.FAILED, summary = message)
+                }
+                emit("${service.name}: $message", true)
+            }
+        }
+    }
+
+    fun cancelHostingAiFix() {
+        hostingAiJob?.cancel()
+        hostingAiJob = null
+        _hostingAi.update { session ->
+            if (session?.status == HostingAiStatus.RUNNING) {
+                session.copy(
+                    status = HostingAiStatus.CANCELLED,
+                    summary = "Stopped by the user.",
+                )
+            } else {
+                session
+            }
+        }
+    }
+
+    /** First saved route, then a combo, then the first active provider default. */
+    private suspend fun resolveHostingAiModel(): String = withContext(Dispatchers.IO) {
+        val saved = repo.getSetting(HostingAi.MODEL_KEY)?.trim().orEmpty()
+        if (saved.isNotEmpty()) return@withContext saved
+        repo.comboDao.getAll()
+            .firstOrNull { it.kind != "vision" }
+            ?.name
+            ?.takeIf { it.isNotBlank() }
+            ?.let { return@withContext it }
+        val custom = repo.customSpecs()
+        val connections = repo.providerDao.getAll()
+            .filter { it.isActive }
+            .sortedBy { it.priority }
+        for (connection in connections) {
+            val spec = ProviderCatalog.byId(connection.provider)
+                ?: custom.firstOrNull { it.id == connection.provider }
+                ?: continue
+            if (!spec.available) continue
+            val modelId = connection.defaultModel?.takeIf { it.isNotBlank() }
+                ?: spec.defaultModel
+                ?: spec.models.firstOrNull { it.kind == "llm" }?.id
+                ?: continue
+            val prefix = if (spec.isCompatible) spec.alias ?: spec.id else spec.id
+            return@withContext "$prefix/$modelId"
+        }
+        ""
+    }
+
+    private suspend fun restartHostedForAi(
+        context: Application,
+        service: HostedService,
+    ): String = withContext(Dispatchers.IO) {
+        try {
+            HostingManager.invalidateBuild(context, service)
+            HostingManager.stop(service.id)
+            HostingManager.start(context, service)
+            val deadline = System.currentTimeMillis() + 25_000
+            while (System.currentTimeMillis() < deadline) {
+                val status = HostingRuntime.state(service.id).status
+                if (status == HostStatus.RUNNING || status == HostStatus.ERROR) break
+                delay(400)
+            }
+            val state = HostingRuntime.state(service.id)
+            val log = state.log.takeLast(60).joinToString("\n")
+            buildString {
+                appendLine("Status: ${state.status.name}")
+                if (state.message.isNotBlank()) appendLine("Message: ${state.message}")
+                appendLine("Logs:")
+                append(SecretMask.text(log).ifBlank { "(no output)" })
+            }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            val log = HostingRuntime.state(service.id).log.takeLast(40).joinToString("\n")
+            "ERROR: ${SecretMask.text(error.message ?: "Could not restart the service")}\n" +
+                "Logs:\n${SecretMask.text(log).ifBlank { "(no output)" }}"
+        }
+    }
+
+    private suspend fun checkHostedHttp(
+        service: HostedService,
+        rawPath: String,
+    ): String = withContext(Dispatchers.IO) {
+        var path = rawPath.trim().ifBlank { "/" }
+        if (path.contains("://")) return@withContext "ERROR: only a local path is allowed."
+        if (!path.startsWith("/")) path = "/$path"
+        val state = HostingRuntime.state(service.id)
+        val port = state.port.takeIf { it > 0 } ?: service.port
+        val address = "http://127.0.0.1:$port$path"
+        var connection: HttpURLConnection? = null
+        try {
+            connection = URL(address).openConnection() as HttpURLConnection
+            connection.connectTimeout = 5_000
+            connection.readTimeout = 12_000
+            connection.instanceFollowRedirects = false
+            connection.requestMethod = "GET"
+            val code = connection.responseCode
+            val stream = if (code >= 400) connection.errorStream else connection.inputStream
+            val body = stream?.bufferedReader()?.use { readLimited(it, 8_000) }.orEmpty()
+            "HTTP $code\n$address\n\n$body"
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            "ERROR: ${error.message ?: error.javaClass.simpleName}"
+        } finally {
+            connection?.disconnect()
         }
     }
 
@@ -1422,4 +1681,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     data class UiEvent(val message: String, val isError: Boolean = false)
+}
+
+/** Read a response body without letting a large page exhaust memory. */
+private fun readLimited(reader: Reader, max: Int): String {
+    val builder = StringBuilder()
+    val buffer = CharArray(2048)
+    while (builder.length < max) {
+        val read = reader.read(buffer)
+        if (read <= 0) break
+        builder.append(buffer, 0, minOf(read, max - builder.length))
+    }
+    return builder.toString()
 }

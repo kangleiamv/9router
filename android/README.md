@@ -19,7 +19,7 @@ implementation of the dashboard, and all routing logic is ported to Kotlin.
 | Routing | Combos, vision combo, per-account fallback, exponential backoff, model locks |
 | Telegram | Bot API long polling inside the foreground service, `/help` `/model` `/combo` `/vision` `/status` `/quota` `/clear` |
 | Cloudflare Tunnel | Optional public endpoint via a bundled native `cloudflared` connector: quick `trycloudflare.com` URLs or named Zero Trust tunnels, plus local links that each choose their own quick connector or the shared named tunnel; HTTP apps, an optional on-device FTP host with a browser file view, and named TCP routes for databases and SSH |
-| Hosting | Tabbed on-device hosting console: supervised static, PHP, Node.js, Python, Redis, PostgreSQL and MariaDB runtimes on loopback, immutable ZIP/folder releases with rollback, bundled npm 11.19.1 installs and builds for Node.js, hostnames routed through named local links, MariaDB schema administration through bundled PDO, self-signed TLS pairs from bundled OpenSSL, multi-account FTP logins, a file manager and per-site storage. Every service gets an app-owned folder, generated credentials, log capture and restarts |
+| Hosting | Tabbed on-device hosting console: supervised static, PHP, Node.js, Python, Redis, PostgreSQL and MariaDB runtimes on loopback, immutable ZIP/folder releases with rollback, bundled npm 11.19.1 installs and builds for Node.js, a **Fix with AI** agent routed through the configured provider/combo, hostnames routed through named local links, MariaDB schema administration through bundled PDO, self-signed TLS pairs from bundled OpenSSL, multi-account FTP logins, a file manager and per-site storage. Every service gets an app-owned folder, generated credentials, log capture and restarts |
 | UI | Compose Material 3, complete dark and light palettes, animated drawer navigation, System/Light/Dark appearance picker |
 | Background | Foreground service + boot receiver (auto-start optional) |
 
@@ -70,10 +70,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.26>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.27>.
 
 ```bash
-adb install -r 9router-android-1.3.26-debug.apk
+adb install -r 9router-android-1.3.27-debug.apk
 ```
 
 The APK is about 98 MB because it carries the arm64 hosting runtimes. It builds
@@ -503,6 +503,36 @@ legacy `public` folder before the first deploy) in a small file manager:
 Uploads and edits are written through a temporary sibling file, so a crash
 cannot truncate a served file. Paths are resolved below the service folder and
 `..`, absolute paths and symlink escapes are refused.
+
+#### Fix with AI
+
+Every site's **Manage** sheet has **Fix with AI**, and a site in `ERROR` also
+shows it directly on its card. The agent uses the same internal chat route as
+the Telegram bot, so it works with an existing provider connection, a saved
+model or a combo; leave the model blank to use the first saved route. The
+chosen route is remembered in Settings.
+
+The agent receives the recent site output, the service definition (without
+secret values) and a listing of the active release. It can list and read source
+files, make exact replacements or write a text file, restart the supervised
+runtime, read the new log and probe the loopback URL. It cannot run arbitrary
+shell commands, install native packages or write `.env`/key files.
+
+- Paths are resolved inside the active release. `node_modules`, `.next`,
+  `.git`, caches and the backup folder are hidden and read-only.
+- Logs and file reads are masked for bearer tokens, API keys, passwords,
+  cookies, JWTs, private keys and credentials embedded in URLs.
+- Edits are backed up under
+  `files/hosting/<id>/ai-backups/<release>/<timestamp>/` before writing.
+- The loop is capped at 14 model turns and 3 minutes per provider call. Editing
+  a file invalidates the release's `.build-<release>` marker, so the next
+  restart installs/builds before using the edited sources.
+- The transcript shows each read, edit, restart and HTTP check. A site that
+  remains stopped is reported instead of claiming success.
+
+The agent is deliberately a repair tool, not a general shell. If a release is
+missing source files, an external service is down, or a secret is absent, it
+stops and tells you what the user must supply.
 
 #### Domains, databases, TLS and FTP accounts
 

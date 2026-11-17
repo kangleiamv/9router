@@ -1098,6 +1098,16 @@ object HostingManager {
         }
     }
 
+    /**
+     * Forget a completed build after the hosting AI edits a release. The next
+     * start then installs/builds again instead of serving edited sources with
+     * an old `.next` or `dist` folder.
+     */
+    fun invalidateBuild(context: Context, service: HostedService) {
+        if (service.active.isBlank()) return
+        buildMarker(layout(context, service), service.active).delete()
+    }
+
     private fun buildMarker(layout: HostLayout, releaseId: String): File =
         File(layout.root, ".build-$releaseId")
 

@@ -106,8 +106,8 @@ quota tracking and the Telegram bot. Every screen is Compose — there is no
 WebView and no demo build.
 
 Download the debug APK from
-[Releases](https://github.com/kangleiamv/9router/releases/tag/android-v1.3.26),
-then `adb install -r 9router-android-1.3.26-debug.apk` (or open the file on the
+[Releases](https://github.com/kangleiamv/9router/releases/tag/android-v1.3.27),
+then `adb install -r 9router-android-1.3.27-debug.apk` (or open the file on the
 device). Build instructions are in [`android/README.md`](./android/README.md).
 The Providers screen mirrors the web registry with bundled logos, and the
 **Models** button discovers each provider's live catalog and caches it for
@@ -116,9 +116,12 @@ and doubles as a small Vercel-style platform: static, PHP, Node.js and Python
 sites take ZIP uploads or a folder picked from the device, keep the last five
 immutable releases, expose per-service environment variables, bundled npm
 install/build toggles and an optional build command, and support
-activate/rollback. Node.js deploys install `package.json` dependencies with
-`npm ci`/`npm install`, run the build script, and start with `npm start` when
-the project defines one. The same console manages
+activate/rollback. A **Fix with AI** action connects to the provider connection
+or combo already configured in the app, reads the site log and active release,
+edits source files, restarts the service and verifies the result. Node.js
+deploys install `package.json` dependencies with `npm ci`/`npm install`, run
+the build script, and start with `npm start` when the project defines one. The
+same console manages
 hostnames (each one creates a named local link), on-device MariaDB schemas with
 ready-made `DB_*`/`DATABASE_URL` injection, self-signed TLS pairs generated with
 the bundled OpenSSL, multi-account FTP logins per site, and storage per runtime.

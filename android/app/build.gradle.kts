@@ -18,8 +18,8 @@ android {
         // blocks node_modules/.bin shims and prebuilt native binaries. The
         // Android 10+ install floor is lower than 28, so it still installs.
         targetSdk = 28
-        versionCode = 31
-        versionName = "1.3.26"
+        versionCode = 32
+        versionName = "1.3.27"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }

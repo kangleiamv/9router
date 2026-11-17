@@ -31,6 +31,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
@@ -78,6 +79,7 @@ import ai.ninerouter.core.HostStatus
 import ai.ninerouter.core.HostStorage
 import ai.ninerouter.core.HostedKinds
 import ai.ninerouter.core.HostedService
+import ai.ninerouter.core.HostingAi
 import ai.ninerouter.service.server.HostingManager
 import ai.ninerouter.core.HostingStore
 import ai.ninerouter.core.NpmRuntime
@@ -120,6 +122,8 @@ fun HostingScreen(viewModel: MainViewModel) {
     val states by viewModel.hostingStates.collectAsState()
     val availability by viewModel.hostingAvailability.collectAsState()
     val settings by viewModel.settings.collectAsState()
+    val combos by viewModel.combos.collectAsState()
+    val aiSession by viewModel.hostingAi.collectAsState()
     val ftpState by viewModel.ftpHostState.collectAsState()
     val gatewayPort by viewModel.port.collectAsState()
 
@@ -127,6 +131,7 @@ fun HostingScreen(viewModel: MainViewModel) {
     var tab by remember { mutableStateOf("overview") }
     var createOpen by remember { mutableStateOf(false) }
     var manageId by remember { mutableStateOf<String?>(null) }
+    var aiFor by remember { mutableStateOf<HostedService?>(null) }
     var domainFor by remember { mutableStateOf<HostedService?>(null) }
     var portFor by remember { mutableStateOf<HostedService?>(null) }
     var deleteFor by remember { mutableStateOf<HostedService?>(null) }
@@ -200,6 +205,7 @@ fun HostingScreen(viewModel: MainViewModel) {
                     },
                     onOpen = { openUrl("http://127.0.0.1:${effectivePort(it, states[it.id] ?: HostServiceState())}/") },
                     onFiles = { filesForId = it.id },
+                    onAi = { aiFor = it; manageId = null },
                     onDeploy = {
                         deployForId = it.id
                         deployPicker.launch(arrayOf("application/zip"))
@@ -261,6 +267,7 @@ fun HostingScreen(viewModel: MainViewModel) {
                 openUrl("http://127.0.0.1:${effectivePort(manage, states[manage.id] ?: HostServiceState())}/")
             },
             onFiles = { filesForId = manage.id; manageId = null },
+            onAi = { aiFor = manage; manageId = null },
             onReleases = { releasesFor = manage; manageId = null },
             onEnvironment = { envFor = manage; manageId = null },
             onDeploy = {
@@ -321,6 +328,18 @@ fun HostingScreen(viewModel: MainViewModel) {
                 onChanged = { viewModel.refreshSettings() },
             )
         }
+    }
+
+    aiFor?.let { target ->
+        HostingAiDialog(
+            service = services.firstOrNull { it.id == target.id } ?: target,
+            session = aiSession?.takeIf { it.serviceId == target.id },
+            defaultModel = settings[HostingAi.MODEL_KEY].orEmpty(),
+            combos = combos,
+            onStart = { model -> viewModel.startHostingAiFix(target.id, model) },
+            onCancel = viewModel::cancelHostingAiFix,
+            onDismiss = { aiFor = null },
+        )
     }
 
     if (releasesFor != null) {
@@ -652,6 +671,7 @@ private fun SitesTab(
     onToggle: (HostedService) -> Unit,
     onOpen: (HostedService) -> Unit,
     onFiles: (HostedService) -> Unit,
+    onAi: (HostedService) -> Unit,
     onDeploy: (HostedService) -> Unit,
     onFolder: (HostedService) -> Unit,
 ) {
@@ -728,6 +748,7 @@ private fun SitesTab(
                 onToggle = { onToggle(service) },
                 onOpen = { onOpen(service) },
                 onFiles = { onFiles(service) },
+                onAi = { onAi(service) },
                 onDeploy = { onDeploy(service) },
                 onFolder = { onFolder(service) },
             )
@@ -743,6 +764,7 @@ private fun SiteCard(
     onToggle: () -> Unit,
     onOpen: () -> Unit,
     onFiles: () -> Unit,
+    onAi: () -> Unit,
     onDeploy: () -> Unit,
     onFolder: () -> Unit,
 ) {
@@ -848,6 +870,16 @@ private fun SiteCard(
                 }
             }
         }
+        if (state.status == HostStatus.ERROR) {
+            Spacer(Modifier.height(6.dp))
+            GhostButton(
+                text = "Fix with AI",
+                onClick = onAi,
+                modifier = Modifier.fillMaxWidth(),
+                icon = Icons.Filled.AutoAwesome,
+                color = Rose,
+            )
+        }
     }
 }
 
@@ -864,6 +896,7 @@ private fun SiteManageDialog(
     onToggle: () -> Unit,
     onOpen: () -> Unit,
     onFiles: () -> Unit,
+    onAi: () -> Unit,
     onReleases: () -> Unit,
     onEnvironment: () -> Unit,
     onDeploy: () -> Unit,
@@ -944,6 +977,14 @@ private fun SiteManageDialog(
                         modifier = Modifier.weight(1f),
                     )
                 }
+                Spacer(Modifier.height(6.dp))
+                GhostButton(
+                    text = "Fix with AI",
+                    onClick = onAi,
+                    modifier = Modifier.fillMaxWidth(),
+                    icon = Icons.Filled.AutoAwesome,
+                    color = if (state.status == HostStatus.ERROR) Rose else Brand,
+                )
 
                 if (state.message.isNotBlank()) {
                     Spacer(Modifier.height(8.dp))

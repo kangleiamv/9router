@@ -780,7 +780,19 @@ class AppRepository(context: android.content.Context) {
             }.getOrElse { false to (it.message ?: "Failed") }
         }
 
-    suspend fun chatInternal(model: String, messages: List<Pair<String, String>>, system: String?): String {
+    suspend fun chatInternal(model: String, messages: List<Pair<String, String>>, system: String?): String =
+        chatInternalReply(model, messages, system).text
+
+    /**
+     * Same internal route as Telegram, but keeps transport failures separate
+     * from model output. The hosting AI agent must not mistake an upstream
+     * error body for a tool instruction.
+     */
+    suspend fun chatInternalReply(
+        model: String,
+        messages: List<Pair<String, String>>,
+        system: String?,
+    ): ai.ninerouter.core.HostingAiReply {
         val array = kotlinx.serialization.json.buildJsonArray {
             if (!system.isNullOrBlank()) {
                 add(kotlinx.serialization.json.buildJsonObject {
@@ -803,19 +815,27 @@ class AppRepository(context: android.content.Context) {
         return when (val result = engine.handleChat(payload, internalBypass = true)) {
             is ai.ninerouter.engine.EngineResult.Buffered -> {
                 if (result.status !in 200..299) {
-                    ai.ninerouter.engine.UpstreamClient.extractError(result.body)
+                    ai.ninerouter.core.HostingAiReply(
+                        ok = false,
+                        text = ai.ninerouter.engine.UpstreamClient.extractError(result.body),
+                    )
                 } else {
-                    runCatching {
+                    val text = runCatching {
                         val json = ai.ninerouter.util.Json.lenient
                             .parseToJsonElement(result.body) as kotlinx.serialization.json.JsonObject
                         val choices = json["choices"] as kotlinx.serialization.json.JsonArray
                         val message = (choices.first() as kotlinx.serialization.json.JsonObject)["message"]
                             as kotlinx.serialization.json.JsonObject
-                        (message["content"] as? kotlinx.serialization.json.JsonPrimitive)?.content.orEmpty()
+                        ai.ninerouter.engine.contentText(message["content"])
                     }.getOrDefault("No response")
+                    ai.ninerouter.core.HostingAiReply(ok = true, text = text)
                 }
             }
-            is ai.ninerouter.engine.EngineResult.Stream -> "Streaming is not supported in Telegram chat."
+            is ai.ninerouter.engine.EngineResult.Stream ->
+                ai.ninerouter.core.HostingAiReply(
+                    ok = false,
+                    text = "Streaming is not supported for the hosting AI agent.",
+                )
         }
     }
 }

@@ -70,10 +70,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.28>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.29>.
 
 ```bash
-adb install -r 9router-android-1.3.28-debug.apk
+adb install -r 9router-android-1.3.29-debug.apk
 ```
 
 The APK is about 98 MB because it carries the arm64 hosting runtimes. It builds
@@ -524,9 +524,13 @@ shell commands, install native packages or write `.env`/key files.
   cookies, JWTs, private keys and credentials embedded in URLs.
 - Edits are backed up under
   `files/hosting/<id>/ai-backups/<release>/<timestamp>/` before writing.
-- The loop is capped at 14 model turns and 3 minutes per provider call. Editing
-  a file invalidates the release's `.build-<release>` marker, so the next
-  restart installs/builds before using the edited sources.
+- The loop is capped at 24 model turns and 3 minutes per provider call. Every
+  tool result reports the remaining budget, and the last turns tell the model to
+  wrap up. If the budget runs out, one final tool-free turn asks for a summary;
+  the result then reports the real service state and changed files instead of a
+  generic step-limit error. Editing a file invalidates the release's
+  `.build-<release>` marker, so the next restart installs/builds before using
+  the edited sources.
 - The transcript shows each read, edit, restart and HTTP check. A site that
   remains stopped is reported instead of claiming success.
 

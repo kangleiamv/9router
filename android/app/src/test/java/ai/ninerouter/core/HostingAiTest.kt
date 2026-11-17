@@ -175,6 +175,69 @@ class HostingAiTest {
     }
 
     @Test
+    fun `agent keeps its diagnosis and reports the step budget`() = runBlocking {
+        val root = root()
+        write(root, "server.js", "console.log('ok');\n")
+        val seen = mutableListOf<List<Pair<String, String>>>()
+        val replies = ArrayDeque(
+            listOf(
+                """{"action":"read_file","path":"server.js"}""",
+                """{"action":"done","summary":"Read the entry file."}""",
+            ),
+        )
+        val run = HostingAiAgent(HostingAiTools(root), FakeHost()).run(
+            service = HostedService(id = "site", kind = "node", name = "Demo", port = 3000),
+            model = "test/model",
+            chat = { messages, _ ->
+                seen += messages
+                HostingAiReply(true, replies.removeFirst())
+            },
+            onStep = {},
+        )
+
+        assertFalse(run.ok)
+        assertTrue(run.summary.contains("The site is still not running."))
+        val secondTurn = seen[1]
+        assertTrue(
+            secondTurn.any { (role, text) ->
+                role == "assistant" && text.contains("\"action\":\"read_file\"")
+            },
+        )
+        assertTrue(
+            secondTurn.any { (role, text) ->
+                role == "user" && text.contains("STEP 1/24") &&
+                    text.contains("23 step(s) left")
+            },
+        )
+    }
+
+    @Test
+    fun `agent asks for a final summary at the step limit`() = runBlocking {
+        val root = root()
+        val replies = ArrayDeque(
+            listOf(
+                """{"action":"list_files","path":""}""",
+                """{"action":"list_files","path":""}""",
+                """{"action":"done","summary":"The deploy is empty; re-host the project."}""",
+            ),
+        )
+        val steps = mutableListOf<HostingAiStep>()
+        val run = HostingAiAgent(HostingAiTools(root), FakeHost(), maxSteps = 2).run(
+            service = HostedService(id = "site", kind = "node", name = "Demo", port = 3000),
+            model = "test/model",
+            chat = { _, _ -> HostingAiReply(true, replies.removeFirst()) },
+            onStep = { steps += it },
+        )
+
+        assertFalse(run.ok)
+        assertTrue(run.summary.contains("Reached the 2-step limit"))
+        assertTrue(run.summary.contains("The deploy is empty; re-host the project."))
+        assertTrue(run.summary.contains("Current status: ERROR"))
+        assertTrue(steps.any { it.title == "AI stopped at the step limit" })
+        assertTrue(steps.none { it.title == "AI stopped" })
+    }
+
+    @Test
     fun `agent stops after repeated non-json replies`() = runBlocking {
         val root = root()
         val steps = mutableListOf<HostingAiStep>()

@@ -35,6 +35,8 @@ class HostingAiAgent(
         )
         var restarted = false
         var invalidReplies = 0
+        var lastAction = ""
+        var repeatedActions = 0
 
         for (step in 1..maxSteps) {
             val reply = try {
@@ -45,6 +47,7 @@ class HostingAiAgent(
                 return fail(
                     "The AI provider did not answer within 3 minutes.",
                     onStep,
+                    restarted,
                 )
             } catch (cancel: CancellationException) {
                 throw cancel
@@ -52,6 +55,7 @@ class HostingAiAgent(
                 return fail(
                     "Provider request failed: ${SecretMask.text(error.message ?: error.javaClass.simpleName)}",
                     onStep,
+                    restarted,
                 )
             }
             if (!reply.ok) {
@@ -75,10 +79,13 @@ class HostingAiAgent(
                         "The model kept replying without a JSON tool action. " +
                             "Use a stronger model for this site.",
                         onStep,
+                        restarted,
                     )
                 }
-                messages += "assistant" to "I need to call a tool."
-                messages += "user" to formatCorrection
+                messages += "assistant" to reply.text.trim()
+                    .take(HostingAi.MAX_ASSISTANT_CHARS)
+                    .ifBlank { "I need to call a tool." }
+                messages += "user" to "$formatCorrection\n${budget(step)}"
                 continue
             }
             invalidReplies = 0
@@ -93,28 +100,37 @@ class HostingAiAgent(
                             "Files changed, but the site has not been restarted.",
                         ),
                     )
-                    messages += "assistant" to "I am ready to finish."
+                    messages += "assistant" to reply.text.trim()
+                        .take(HostingAi.MAX_ASSISTANT_CHARS)
+                        .ifBlank { "I am ready to finish." }
                     messages += "user" to (
                         "TOOL ERROR: files changed but the service was not restarted. " +
-                            "Call {\"action\":\"restart\"} and verify the log before done."
+                            "Call {\"action\":\"restart\"} and verify the log before done. " +
+                            budget(step)
                         )
                     continue
                 }
                 val state = host.state()
+                val running = state.status == HostStatus.RUNNING
+                val modelSummary = SecretMask.text(action.summary)
+                val summary = if (running) {
+                    modelSummary
+                } else {
+                    "$modelSummary The site is still not running."
+                }
                 onStep(
                     HostingAiStep(
-                        if (state.status == HostStatus.RUNNING) HostingAiTone.SUCCESS
-                        else HostingAiTone.INFO,
-                        "AI finished",
-                        action.summary.take(1200),
+                        if (running) HostingAiTone.SUCCESS else HostingAiTone.ERROR,
+                        if (running) "AI finished" else "AI stopped with the site still down",
+                        summary.take(1200),
                     ),
                 )
                 return HostingAiRun(
-                    ok = true,
-                    summary = action.summary,
+                    ok = running,
+                    summary = summary,
                     changedFiles = tools.changedFiles(),
                     restarted = restarted,
-                    siteRunning = state.status == HostStatus.RUNNING,
+                    siteRunning = running,
                 )
             }
 
@@ -146,15 +162,133 @@ class HostingAiAgent(
                     if (result.ok) "" else result.output.take(500),
                 ),
             )
+            val signature = "${action.javaClass.simpleName}:${action.hashCode()}"
+            if (signature == lastAction) {
+                repeatedActions++
+            } else {
+                lastAction = signature
+                repeatedActions = 1
+            }
             val output = result.output.take(HostingAi.MAX_TOOL_OUTPUT)
-            messages += "assistant" to "I called ${label(action)}."
-            messages += "user" to "TOOL RESULT (${label(action)}):\n$output"
+            // Keep the model's own diagnosis and patch text. Replacing every
+            // turn with "I called read_file" made models restart their
+            // investigation and burn through the step budget.
+            messages += "assistant" to reply.text.trim()
+                .take(HostingAi.MAX_ASSISTANT_CHARS)
+                .ifBlank { "I called ${label(action)}." }
+            messages += "user" to buildString {
+                appendLine("TOOL RESULT (${label(action)}):")
+                appendLine(output)
+                appendLine()
+                appendLine(budget(step))
+                if (repeatedActions >= 3) {
+                    appendLine(
+                        "REPEAT WARNING: you already ran this exact action " +
+                            "$repeatedActions times. It is not producing new evidence. " +
+                            "Change approach or call done with what you have.",
+                    )
+                }
+                val left = maxSteps - step
+                if (left in 1..4) {
+                    appendLine(wrapUp(left, restarted))
+                }
+            }
         }
 
-        return fail(
-            "Stopped after $maxSteps steps. The site may still need attention; " +
-                "review the transcript or run the agent again.",
-            onStep,
+        return finishAtLimit(messages, system, chat, onStep, restarted)
+    }
+
+    private fun budget(step: Int): String =
+        "STEP $step/$maxSteps · ${maxSteps - step} step(s) left · " +
+            "site ${host.state().status.name}."
+
+    private fun wrapUp(left: Int, restarted: Boolean): String = buildString {
+        append("WRAP UP: $left step(s) left. ")
+        if (tools.changedFiles().isNotEmpty() && !restarted) {
+            append("Call restart now. ")
+        } else {
+            append("Do not start another investigation. ")
+        }
+        append(
+            "Read the log once, check HTTP once, then call done with what " +
+                "you verified and what the user must still do.",
+        )
+    }
+
+    /**
+     * The step limit is a safety rail, not a crash. Ask for one final summary
+     * without tools, then report the real service state and changed files.
+     */
+    private suspend fun finishAtLimit(
+        messages: List<Pair<String, String>>,
+        system: String,
+        chat: suspend (messages: List<Pair<String, String>>, system: String) -> HostingAiReply,
+        onStep: (HostingAiStep) -> Unit,
+        restarted: Boolean,
+    ): HostingAiRun {
+        val finalPrompt =
+            "FINAL TURN: the tool budget is exhausted. Do not call a tool. " +
+                "Reply with one JSON object: " +
+                "{\"action\":\"done\",\"summary\":\"what you changed, what you verified " +
+                "and what the user must still do\"}"
+        val reply = try {
+            withTimeout(HostingAi.MAX_CALL_MS) {
+                chat(compact(messages + ("user" to finalPrompt)), system)
+            }
+        } catch (timeout: TimeoutCancellationException) {
+            null
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            null
+        }
+        val modelText = when {
+            reply == null || !reply.ok -> ""
+            else -> {
+                val action = HostingAiParser.parse(reply.text)
+                if (action is HostingAiAction.Done) action.summary
+                else reply.text.trim()
+            }
+        }
+        val files = tools.changedFiles()
+        val state = host.state()
+        val running = state.status == HostStatus.RUNNING
+        val applied = files.isEmpty() || restarted
+        val ok = running && applied
+        val details = buildString {
+            append("Reached the $maxSteps-step limit. ")
+            if (modelText.isNotBlank()) {
+                append(SecretMask.text(modelText).take(1600))
+            } else {
+                append("The agent could not produce a final summary.")
+            }
+            append(" Current status: ${state.status.name}")
+            if (state.message.isNotBlank()) {
+                append(" (${SecretMask.text(state.message).take(220)})")
+            }
+            append(".")
+            if (files.isNotEmpty()) {
+                append(" ${files.size} file(s) changed")
+                if (restarted) {
+                    append(" and the service was restarted.")
+                } else {
+                    append(" but the edits were not applied by a restart.")
+                }
+            }
+        }
+        onStep(
+            HostingAiStep(
+                if (ok) HostingAiTone.SUCCESS else HostingAiTone.ERROR,
+                if (ok) "AI finished at the step limit" else "AI stopped at the step limit",
+                details.take(1400),
+            ),
+        )
+        return HostingAiRun(
+            ok = ok,
+            summary = details,
+            changedFiles = files,
+            restarted = restarted,
+            siteRunning = running,
         )
     }
 
@@ -203,13 +337,15 @@ class HostingAiAgent(
     private fun fail(
         message: String,
         onStep: (HostingAiStep) -> Unit,
+        restarted: Boolean = false,
     ): HostingAiRun {
-        onStep(HostingAiStep(HostingAiTone.ERROR, "AI stopped", message.take(1000)))
+        val summary = SecretMask.text(message)
+        onStep(HostingAiStep(HostingAiTone.ERROR, "AI stopped", summary.take(1000)))
         return HostingAiRun(
             ok = false,
-            summary = message,
+            summary = summary,
             changedFiles = tools.changedFiles(),
-            restarted = false,
+            restarted = restarted,
             siteRunning = host.state().status == HostStatus.RUNNING,
         )
     }
@@ -270,11 +406,15 @@ class HostingAiAgent(
         appendLine("- Prefer replace_in_file for small edits; keep changes minimal and real.")
         appendLine("- Read a file before editing it. Never invent package versions or file contents.")
         appendLine("- After any file change, call restart. Then read logs and check HTTP.")
+        appendLine("- You have about $maxSteps tool steps. Every tool result shows the step number.")
+        appendLine("  Do not repeat the same read or listing. Once the evidence names a cause,")
+        appendLine("  make the fix, restart, verify once, then call done.")
         appendLine("- Do not finish while the site is still failing, unless you need the user to")
         appendLine("  provide a missing source file, secret or external service.")
         appendLine("- Never write .env or other secret files; tell the user to use Environment.")
         appendLine("- Secret values are redacted in file and log output. Never try to recover them.")
         appendLine("- If a file is missing from the release, say so instead of creating a fake stub.")
+        appendLine("  Do not keep searching for a file the user never deployed.")
         appendLine()
         appendLine("CURRENT EVIDENCE")
         appendLine(tools.contextSummary())

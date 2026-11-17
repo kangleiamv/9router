@@ -15,7 +15,8 @@ import java.util.Locale
  */
 object HostingAi {
     const val MODEL_KEY = "hosting_ai_model"
-    const val MAX_STEPS = 14
+    const val MAX_STEPS = 24
+    const val MAX_ASSISTANT_CHARS = 8_000
     const val MAX_READ_CHARS = 48_000
     const val MAX_WRITE_CHARS = 240_000
     const val MAX_TOOL_OUTPUT = 24_000

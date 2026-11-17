@@ -70,10 +70,10 @@ Artifacts). No signing secrets are required for the debug build.
 ## Install
 
 A debug-signed APK is published at
-<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.27>.
+<https://github.com/kangleiamv/9router/releases/tag/android-v1.3.28>.
 
 ```bash
-adb install -r 9router-android-1.3.27-debug.apk
+adb install -r 9router-android-1.3.28-debug.apk
 ```
 
 The APK is about 98 MB because it carries the arm64 hosting runtimes. It builds

@@ -210,7 +210,11 @@ object UpstreamClient {
         }
         fun execute(request: Request): Response =
             runCatching { client.newCall(request).execute() }
-                .getOrElse { throw UpstreamException("Connection to ${spec.name} failed: ${it.message}") }
+                .getOrElse {
+                    throw UpstreamException(
+                        "Connection to ${spec.name} failed: ${networkFailureDetail(it)}",
+                    )
+                }
 
         var response = execute(buildRequest())
         // A missing or stale Cloud project makes Google answer 404 with this
@@ -1353,7 +1357,27 @@ object UpstreamClient {
                     false to "HTTP ${prepared.response.status}: ${extractError(body).take(220)}"
                 }
             }
-        }.getOrElse { false to (it.message ?: "Connection failed") }
+        }.getOrElse { false to networkFailureDetail(it) }
+    }
+
+    /**
+     * Some network exceptions (notably Android's NetworkOnMainThreadException
+     * and some DNS failures) carry no message. Keep the class name and the
+     * first useful cause so errors never read "failed: null".
+     */
+    internal fun networkFailureDetail(error: Throwable): String {
+        val parts = generateSequence(error) { it.cause }
+            .take(4)
+            .map { cause ->
+                val name = cause.javaClass.simpleName.ifBlank { cause.javaClass.name }
+                val message = cause.message?.trim()?.takeIf { it.isNotEmpty() }
+                if (message == null) name else "$name: $message"
+            }
+            .distinct()
+            .toList()
+        return parts.joinToString(": ").ifBlank {
+            error.javaClass.simpleName.ifBlank { error.javaClass.name }
+        }
     }
 
     fun extractError(body: String): String {

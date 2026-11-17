@@ -131,7 +131,9 @@ class ProxyEngine(
                         ctx.copy(model = target.modelId)
                     )
                 } catch (error: Throwable) {
-                    lastMessage = error.message ?: "Connection failed"
+                    lastMessage = error.message
+                        ?.takeIf { it.isNotBlank() }
+                        ?: "Connection failed: ${error.javaClass.simpleName}"
                     lastStatus = 502
                     continue
                 }

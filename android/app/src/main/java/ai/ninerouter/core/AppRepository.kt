@@ -812,30 +812,36 @@ class AppRepository(context: android.content.Context) {
             put("messages", array)
             put("stream", false)
         }
-        return when (val result = engine.handleChat(payload, internalBypass = true)) {
-            is ai.ninerouter.engine.EngineResult.Buffered -> {
-                if (result.status !in 200..299) {
+        // ProxyEngine performs blocking OkHttp calls. Callers include the
+        // hosting AI doctor, which starts on the main dispatcher; without this
+        // switch Android would throw NetworkOnMainThreadException (whose empty
+        // message surfaced as "Connection to <provider> failed: null").
+        return withContext(Dispatchers.IO) {
+            when (val result = engine.handleChat(payload, internalBypass = true)) {
+                is ai.ninerouter.engine.EngineResult.Buffered -> {
+                    if (result.status !in 200..299) {
+                        ai.ninerouter.core.HostingAiReply(
+                            ok = false,
+                            text = ai.ninerouter.engine.UpstreamClient.extractError(result.body),
+                        )
+                    } else {
+                        val text = runCatching {
+                            val json = ai.ninerouter.util.Json.lenient
+                                .parseToJsonElement(result.body) as kotlinx.serialization.json.JsonObject
+                            val choices = json["choices"] as kotlinx.serialization.json.JsonArray
+                            val message = (choices.first() as kotlinx.serialization.json.JsonObject)["message"]
+                                as kotlinx.serialization.json.JsonObject
+                            ai.ninerouter.engine.contentText(message["content"])
+                        }.getOrDefault("No response")
+                        ai.ninerouter.core.HostingAiReply(ok = true, text = text)
+                    }
+                }
+                is ai.ninerouter.engine.EngineResult.Stream ->
                     ai.ninerouter.core.HostingAiReply(
                         ok = false,
-                        text = ai.ninerouter.engine.UpstreamClient.extractError(result.body),
+                        text = "Streaming is not supported for the hosting AI agent.",
                     )
-                } else {
-                    val text = runCatching {
-                        val json = ai.ninerouter.util.Json.lenient
-                            .parseToJsonElement(result.body) as kotlinx.serialization.json.JsonObject
-                        val choices = json["choices"] as kotlinx.serialization.json.JsonArray
-                        val message = (choices.first() as kotlinx.serialization.json.JsonObject)["message"]
-                            as kotlinx.serialization.json.JsonObject
-                        ai.ninerouter.engine.contentText(message["content"])
-                    }.getOrDefault("No response")
-                    ai.ninerouter.core.HostingAiReply(ok = true, text = text)
-                }
             }
-            is ai.ninerouter.engine.EngineResult.Stream ->
-                ai.ninerouter.core.HostingAiReply(
-                    ok = false,
-                    text = "Streaming is not supported for the hosting AI agent.",
-                )
         }
     }
 }

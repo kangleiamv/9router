@@ -543,19 +543,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             try {
-                val run = HostingAiAgent(tools, host).run(
-                    service = service,
-                    model = route,
-                    chat = { messages, system ->
-                        repo.chatInternalReply(route, messages, system)
-                    },
-                    onStep = { step ->
-                        _hostingAi.update { current ->
-                            if (current?.runTag != runTag) current
-                            else current.copy(steps = (current.steps + step).takeLast(120))
-                        }
-                    },
-                )
+                // The agent snapshots logs and the release tree, and provider
+                // calls block inside OkHttp. Keep all of it off the UI thread.
+                val run = withContext(Dispatchers.IO) {
+                    HostingAiAgent(tools, host).run(
+                        service = service,
+                        model = route,
+                        chat = { messages, system ->
+                            repo.chatInternalReply(route, messages, system)
+                        },
+                        onStep = { step ->
+                            _hostingAi.update { current ->
+                                if (current?.runTag != runTag) current
+                                else current.copy(steps = (current.steps + step).takeLast(120))
+                            }
+                        },
+                    )
+                }
                 _hostingAi.update { current ->
                     if (current?.runTag != runTag) current
                     else current.copy(

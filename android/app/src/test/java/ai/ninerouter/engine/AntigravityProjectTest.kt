@@ -96,6 +96,28 @@ class AntigravityProjectTest {
     }
 
     @Test
+    fun `network failures never render a null message`() {
+        assertEquals(
+            "RuntimeException",
+            UpstreamClient.networkFailureDetail(RuntimeException()),
+        )
+        assertEquals(
+            "ConnectException: UnknownHostException: no dns",
+            UpstreamClient.networkFailureDetail(
+                java.net.ConnectException().apply {
+                    initCause(java.net.UnknownHostException("no dns"))
+                },
+            ),
+        )
+        assertEquals(
+            "IllegalStateException: outer: RuntimeException",
+            UpstreamClient.networkFailureDetail(
+                IllegalStateException("outer", RuntimeException()),
+            ),
+        )
+    }
+
+    @Test
     fun `antigravity defaults to the web mandatory model`() {
         assertEquals("gemini-3.8-flash-medium", ProviderCatalog.antigravity.defaultModel)
         assertTrue(
